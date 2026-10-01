@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+
+[workspace.dependencies]
+# Pinned: v0.1.0, unaudited, API not stable.
+vega-prover = { git = "https://github.com/microsoft/vega-prover.git", rev = "c0ee259053cd12eaf43ed71b5cde375452b3ee4d" }
+bellpepper = "0.4.0"
+bellpepper-core = "0.4.0"
+ff = { version = "0.13.0", features = ["derive"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
