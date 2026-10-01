@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "wasm"]
+members = ["core", "wasm", "ffi"]
 
 [workspace.dependencies]
 # Pinned: v0.1.0, unaudited, API not stable.

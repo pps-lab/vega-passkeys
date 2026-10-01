@@ -1,0 +1,27 @@
+[package]
+name = "pop-vega-ffi"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Swift (UniFFI) bindings for the pop-vega prover"
+
+[lib]
+# staticlib → iOS XCFramework; cdylib → host library uniffi-bindgen reads the interface from.
+crate-type = ["staticlib", "cdylib", "lib"]
+name = "pop_vega_ffi"
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+pop-vega = { path = "../core" }
+uniffi = "0.32"
+thiserror = "2.0"
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
