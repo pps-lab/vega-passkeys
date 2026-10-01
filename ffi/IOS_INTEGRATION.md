@@ -1,8 +1,8 @@
 # On-device ZK proof (Path B) — iOS integration
 
 Goal: the app proves "a registered key signed this challenge" on-device and submits the proof. The
-server then authenticates the session without learning which credential signed. This replaces the
-Path A POST (`/verify/appattest`); signing is unchanged.
+server then authenticates the session without learning which credential signed. This is the only iOS
+auth path (the server-verified `/verify/appattest` endpoint has been removed).
 
 ## 1. Add the package
 
@@ -55,7 +55,7 @@ public struct ProverInputs {
   it on the main thread.
 - Call `prove` from a detached task (`Task.detached(priority: .userInitiated)`), not the main actor.
 
-## 4. Auth flow (replaces Path A's last step)
+## 4. Auth flow
 
 Steps 1–3 are unchanged: create the session, `POST /widget/:id/verify/start` → `challenge`, then
 `signAssertion(challenge:)` → `(authData, clientData, signatureDER)`. Then:
@@ -77,11 +77,10 @@ Steps 1–3 are unchanged: create the session, `POST /widget/:id/verify/start` �
      { "proofType": "zk-webauthn-v2",
        "proof": out.proof.base64EncodedString(),     // standard base64 (not url-safe) — ~107 KB
        "clientProofTimeMs": out.proveMs }
-     -> { verified: true, appattest: true, proof: { token, expiresAt } }   // same as Path A
+     -> { verified: true, appattest: true, proof: { token, expiresAt } }
 ```
 
-`base64url(_:)` is standard base64 with `+`→`-`, `/`→`_`, and `=` padding stripped. The existing
-Path A code already has one.
+`base64url(_:)` is standard base64 with `+`→`-`, `/`→`_`, and `=` padding stripped.
 
 ## 5. Constraints and errors
 
@@ -95,8 +94,6 @@ Path A code already has one.
   - 400 `Merkle root mismatch`: the tree changed between fetch and submit. Refetch and re-prove
     once.
   - 400 `Challenge mismatch` / `Session expired`: restart the flow.
-- During rollout, keep Path A behind a debug flag as a fallback. Don't fall back silently in
-  production: Path A reveals which credential authenticated.
 
 ## 6. Verify and measure
 
