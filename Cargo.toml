@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core"]
+members = ["core", "wasm"]
 
 [workspace.dependencies]
 # Pinned: v0.1.0, unaudited, API not stable.
@@ -12,3 +12,7 @@ ff = { version = "0.13.0", features = ["derive"] }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+
+# third_party/vega-prover is the pinned revision plus patches/ (see scripts/fetch-vega-prover.sh).
+[patch."https://github.com/microsoft/vega-prover.git"]
+vega-prover = { path = "third_party/vega-prover" }
