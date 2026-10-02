@@ -38,11 +38,11 @@ public struct ProverInputs {
   var authenticatorData: String   // base64url (no padding) of the signed authData, 37...128 bytes
   var clientDataJson: String      // base64url of the signed clientData, ≤ 256 bytes, must contain the challenge string
   var signature: String           // base64url of the DER signature from SecKeyCreateSignature
-  var pubKeyX: String             // /v1/pubkey `x` (already base64url, pass through)
-  var pubKeyY: String             // /v1/pubkey `y`
+  var pubKeyX: String             // `x` from the /v1/pubkeys entry (already base64url, pass through)
+  var pubKeyY: String             // `y` from the /v1/pubkeys entry
   var challenge: String           // the challenge string from /verify/start, as-is (base64url of 32 bytes)
-  var pathElements: [String]      // /v1/pubkey `merkle.pathElements` (20 hex strings)
-  var pathIndices: [UInt32]       // /v1/pubkey `merkle.pathIndices` (20 × 0/1)
+  var pathElements: [String]      // read from /v1/pubkeys `levels` (20 hex strings), see step 4
+  var pathIndices: [UInt32]       // (index >> i) & 1 (20 × 0/1)
 }
 ```
 
@@ -61,16 +61,19 @@ Steps 1–3 are unchanged: create the session, `POST /widget/:id/verify/start` �
 `signAssertion(challenge:)` → `(authData, clientData, signatureDER)`. Then:
 
 ```
-4. GET /v1/pubkey/<credentialId>
-     -> { x, y, commitment, merkle: { root, pathElements, pathIndices, ... } }
+4. GET /v1/pubkeys
+     -> { root, depth, zeros: [hex × 21], keys: [[credentialId, x, y], ...], levels: [[hex, ...] × 20] }
+   let index = keys.firstIndex { $0[0] == credentialId }   // x, y = keys[index][1], keys[index][2]
+   for i in 0..<depth:  pathElements[i] = levels[i][(index >> i) ^ 1] ?? zeros[i]   // nil past the end
+                        pathIndices[i]  = (index >> i) & 1
 5. let inputs = ProverInputs(
        authenticatorData: base64url(authData),
        clientDataJson:    base64url(clientData),
        signature:         base64url(signatureDER),
-       pubKeyX: resp.x, pubKeyY: resp.y,
+       pubKeyX: x, pubKeyY: y,
        challenge: challenge,
-       pathElements: resp.merkle.pathElements,
-       pathIndices:  resp.merkle.pathIndices.map(UInt32.init))
+       pathElements: pathElements,
+       pathIndices:  pathIndices)
    let out = try await proofService.prove(inputs)
 6. POST /widget/:id/verify/appattest/proof
      Content-Type: application/json
@@ -82,13 +85,18 @@ Steps 1–3 are unchanged: create the session, `POST /widget/:id/verify/start` �
 
 `base64url(_:)` is standard base64 with `+`→`-`, `/`→`_`, and `=` padding stripped.
 
+Step 4 downloads every registered key and selects ours on the device, so the server can't tell which
+credential is about to prove (a stand-in for PIR). No hashing is needed: the tree levels are served.
+The older `GET /v1/pubkey/<credentialId>` (returns `x`, `y` and `merkle.pathElements/pathIndices`
+directly) still works but reveals the credential to the server; switch away from it.
+
 ## 5. Constraints and errors
 
 - The circuit limits are authData 37–128 bytes and clientData ≤ 256 bytes. The current synthetic
   37-byte authData and `{"challenge":"<challenge>"}` clientData fit.
 - The challenge must base64url-decode to exactly 32 bytes and appear verbatim in clientData.
   Anything else throws `InvalidInput`.
-- Don't call `prove` with stale data. Fetch `/v1/pubkey` after `verify/start`, because the root
+- Don't call `prove` with stale data. Fetch `/v1/pubkeys` after `verify/start`, because the root
   must match the server's tree at verification time.
 - Handle server responses:
   - 400 `Merkle root mismatch`: the tree changed between fetch and submit. Refetch and re-prove
