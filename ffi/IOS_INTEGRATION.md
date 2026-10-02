@@ -4,23 +4,19 @@ Goal: the app proves "a registered key signed this challenge" on-device and subm
 server then authenticates the session without learning which credential signed. This is the only iOS
 auth path (the server-verified `/verify/appattest` endpoint has been removed).
 
-## 1. Add the package
+## 1. Build setup
 
-The prover is a prebuilt local Swift Package, built in the proof-of-person repo:
+The app lives in this repo at `ios/`. `ios/Verena.xcodeproj` has a `PopVega` static-library target
+that both the app and the App Clip depend on. Its first build phase runs `vega/ffi/build-xcode.sh`:
+cargo builds the prover for the platform being built and UniFFI generates the Swift bindings into
+`$BUILT_PRODUCTS_DIR/PopVegaFFI/`, compiled as module `PopVega`. Prover changes are picked up on the
+next Xcode build. A build with nothing changed costs about 2 s.
 
-```
-~/Projects/proofofperson/proof-of-person/vega/ffi/out/PopVega
-```
-
-- Add it with File → Add Package Dependencies… → Add Local…. Link the `PopVega` library to **both**
-  the app target and the App Clip target.
-- No extra linker flags are needed.
-- It contains static arm64 libraries for device and Apple-silicon simulators. Intel simulators are
-  not supported.
-- Minimum deployment target is iOS 16.
+- Needs Rust and `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`.
+- Static arm64 libraries only: device and Apple-silicon simulators. Intel simulators are not supported.
 - About 6 MB is added to the linked binary.
-- To rebuild after prover changes: `vega/ffi/build-ios.sh` in the proof-of-person repo. It needs
-  Rust and `rustup target add aarch64-apple-ios aarch64-apple-ios-sim`.
+- `vega/ffi/build-ios.sh` still builds a standalone `PopVega` Swift Package (`vega/ffi/out/PopVega`)
+  for use outside this repo.
 
 ## 2. API
 
