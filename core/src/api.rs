@@ -111,6 +111,9 @@ impl PopInputs {
     if auth_data.len() < MIN_AUTH_DATA || auth_data.len() > MAX_AUTH_DATA {
       return Err(input_err(format!("authenticatorData must be {MIN_AUTH_DATA}..={MAX_AUTH_DATA} bytes")));
     }
+    if auth_data[32] & 0x04 == 0 {
+      return Err(input_err("authenticatorData UV flag not set"));
+    }
     if cdj.len() > MAX_CDJ {
       return Err(input_err(format!("clientDataJSON longer than {MAX_CDJ} bytes")));
     }

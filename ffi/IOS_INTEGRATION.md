@@ -90,6 +90,8 @@ directly) still works but reveals the credential to the server; switch away from
 
 - The circuit limits are authData 37–128 bytes and clientData ≤ 256 bytes. The current synthetic
   37-byte authData and `{"challenge":"<challenge>"}` clientData fit.
+- authData byte 32 (flags) must have UV (`0x04`) set; the app uses `0x05`. Otherwise `prove`
+  throws `InvalidInput`.
 - The challenge must base64url-decode to exactly 32 bytes and appear verbatim in clientData.
   Anything else throws `InvalidInput`.
 - Don't call `prove` with stale data. Fetch `/v1/pubkeys` after `verify/start`, because the root

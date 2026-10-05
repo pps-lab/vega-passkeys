@@ -1,5 +1,6 @@
 mod common;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bellpepper_core::test_cs::TestConstraintSystem;
 use pop_vega::api::{expected_public_values, scalar_to_hex};
 use pop_vega::circuit::{PopCircuit, PopWitness};
@@ -79,6 +80,22 @@ fn tampered_client_data_fails() {
 fn tampered_auth_data_fails() {
   let mut w = common::fixture().inputs.witness().unwrap();
   w.msg[32] ^= 0x04; // flip UV
+  assert!(!satisfied(w));
+}
+
+#[test]
+fn uv_unset_fails() {
+  // A genuinely signed assertion with UP but not UV.
+  let f = common::fixture_with_flags(&[7u8; 32], [42u8; 32], 5, 0x01);
+  assert!(f.inputs.witness().is_err(), "witness() should reject UV=0");
+  // Bypass the input check, then restore the signed flags byte: the signature is valid,
+  // so only the UV constraint can fail.
+  let mut inputs = f.inputs.clone();
+  let mut ad = URL_SAFE_NO_PAD.decode(&inputs.authenticator_data).unwrap();
+  ad[32] = 0x05;
+  inputs.authenticator_data = URL_SAFE_NO_PAD.encode(&ad);
+  let mut w = inputs.witness().unwrap();
+  w.msg[32] = 0x01;
   assert!(!satisfied(w));
 }
 

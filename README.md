@@ -14,7 +14,8 @@ challenge and the root.
 
 1. `base64url(challenge)` appears in `clientDataJSON` at a private offset, inside its real length.
 2. The signed message is `authenticatorData ‖ SHA-256(clientDataJSON)`. The hash is placed using
-   the same one-hot length wires that the SHA-256 gadget hashes with.
+   the same one-hot length wires that the SHA-256 gadget hashes with. The authenticatorData flags
+   byte must have UV (`0x04`) set.
 3. ECDSA-P256 verifies over `SHA-256(message)` under the private key `(qx, qy)`.
 4. `commitment(qx, qy)` is a leaf of a depth-20 Merkle tree with the public root.
 
@@ -30,7 +31,7 @@ Differences from the Noir circuit:
   - `merkle.js` uses the same Rust code through wasm, so the server tree and the circuit cannot
     drift apart.
 - The key commitment is no longer a public input; the server never checked it.
-- Like the Noir circuit, there is no authenticator-flag (UV/BS) check yet.
+- UV is enforced in-circuit (the Noir circuit checks no flags). BS is not checked.
 
 ## Layout
 

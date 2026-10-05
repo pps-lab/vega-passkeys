@@ -7,7 +7,8 @@
 //!
 //! Checks, mirroring `circuits/src/main.nr`:
 //! 1. base64url(challenge) appears in clientDataJSON at the offset, inside its real length;
-//! 2. the signed message ends with SHA-256(clientDataJSON) (same length wires as the hash);
+//! 2. the signed message ends with SHA-256(clientDataJSON) (same length wires as the hash),
+//!    and its authenticatorData has the UV flag set;
 //! 3. ECDSA-P256 verifies (r, s) over SHA-256(message) under (qx, qy);
 //! 4. Poseidon commitment(qx, qy) is a leaf of the tree with the public root.
 
@@ -174,6 +175,10 @@ impl PopCircuit {
     // 2. message = authData || SHA-256(cdj): the hash sits in the last 32 bytes of the
     // hashed length, selected by the same one-hot length wires the SHA gadget uses.
     let msg_bits = alloc_byte_bits(cs.namespace(|| "msg"), &pad(&w.msg, MAX_MSG))?;
+    // authData's flags byte is msg[32]; require UV (0x04, MSB-first bit 5). These wires are
+    // hashed and signed below, so the flag is bound to the signature.
+    let uv = &msg_bits[32 * 8 + 5];
+    cs.enforce(|| "flags.UV", |_| uv.lc(CS::one(), Scalar::ONE), |lc| lc + CS::one(), |lc| lc + CS::one());
     let (z_bits, _msg_active, len_sel) =
       sha256_var_sized_with_selector(cs.namespace(|| "sha256(msg)"), &msg_bits, w.msg.len(), MAX_MSG, MSG_BLOCKS)?;
     let too_short = len_sel[..MIN_AUTH_DATA + 32]

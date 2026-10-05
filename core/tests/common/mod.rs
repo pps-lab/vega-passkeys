@@ -19,6 +19,10 @@ pub fn fixture() -> Fixture {
 }
 
 pub fn fixture_with(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32) -> Fixture {
+  fixture_with_flags(sk, challenge, leaf_index, 0x05) // UP | UV
+}
+
+pub fn fixture_with_flags(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, flags: u8) -> Fixture {
   let signing_key = SigningKey::from_bytes(sk.into()).unwrap();
   let point = signing_key.verifying_key().to_encoded_point(false);
   let (x, y) = (point.x().unwrap().to_vec(), point.y().unwrap().to_vec());
@@ -28,7 +32,7 @@ pub fn fixture_with(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32) -> Fixt
     r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://verena.se","crossOrigin":false}}"#
   );
   let mut auth_data = Sha256::digest(b"verena.se").to_vec();
-  auth_data.push(0x05); // UP | UV
+  auth_data.push(flags);
   auth_data.extend_from_slice(&[0, 0, 0, 1]);
 
   let mut msg = auth_data.clone();
