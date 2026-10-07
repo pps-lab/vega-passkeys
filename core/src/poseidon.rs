@@ -5,7 +5,7 @@
 //! Parameters come from `scripts/poseidon_params.py`.
 //!
 //! `hash2(tag, a, b)` absorbs `[tag, a, b]` into the full state, permutes once and
-//! returns `state[1]`. The tag separates key commitments from Merkle nodes.
+//! returns `state[1]`. The tag separates key commitments, Merkle nodes and split-proof links.
 
 use crate::poseidon_constants::{ALPHA, MDS, R_F, R_P, ROUND_CONSTANTS, T};
 use crate::Scalar;
@@ -17,6 +17,8 @@ use std::sync::OnceLock;
 pub const TAG_COMMITMENT: u64 = 1;
 /// Domain tag for a Merkle node `H(left, right)`.
 pub const TAG_NODE: u64 = 2;
+/// Domain tag for the split proofs' link `H(leaf, blind)`.
+pub const TAG_LINK: u64 = 3;
 
 struct Params {
   rc: Vec<Scalar>,
@@ -106,6 +108,11 @@ pub fn commitment(x: Scalar, y: Scalar) -> Scalar {
 /// Merkle node.
 pub fn node(left: Scalar, right: Scalar) -> Scalar {
   hash2(TAG_NODE, left, right)
+}
+
+/// Blinded link between the split proofs: hides the leaf, binds both halves to it.
+pub fn link(leaf: Scalar, blind: Scalar) -> Scalar {
+  hash2(TAG_LINK, leaf, blind)
 }
 
 /// A state element: a linear combination plus its witness value. Keeping the linear

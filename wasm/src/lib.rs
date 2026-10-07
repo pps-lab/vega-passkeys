@@ -14,6 +14,9 @@ use wasm_bindgen::prelude::*;
 thread_local! {
   static PK: RefCell<Option<(usize, ProverKey)>> = const { RefCell::new(None) };
   static VK: RefCell<Option<(usize, VerifierKey)>> = const { RefCell::new(None) };
+  // Split proof (benchmarks): the signature key is depth-independent.
+  static SIG_PK: RefCell<Option<ProverKey>> = const { RefCell::new(None) };
+  static ACC_PK: RefCell<Option<(usize, ProverKey)>> = const { RefCell::new(None) };
 }
 
 fn err(e: impl std::fmt::Display) -> JsError {
@@ -89,6 +92,55 @@ pub fn prove(inputs: JsValue) -> Result<JsValue, JsError> {
 pub fn verify(proof: &[u8], depth: Option<usize>) -> Result<Vec<String>, JsError> {
   init_verifier(depth)?;
   VK.with(|vk| api::verify(&vk.borrow().as_ref().expect("initialized").1, proof)).map_err(err)
+}
+
+/// Derives the prover key for the signature half of the split proof. Idempotent.
+#[wasm_bindgen(js_name = initSignatureProver)]
+pub fn init_signature_prover() -> Result<(), JsError> {
+  if SIG_PK.with(|pk| pk.borrow().is_some()) {
+    return Ok(());
+  }
+  let (pk, _vk) = api::setup_signature().map_err(err)?;
+  SIG_PK.with(|cell| *cell.borrow_mut() = Some(pk));
+  Ok(())
+}
+
+/// Derives the prover key for the accumulator half at a Merkle depth. Idempotent per depth.
+#[wasm_bindgen(js_name = initAccumulatorProver)]
+pub fn init_accumulator_prover(depth: usize) -> Result<(), JsError> {
+  if ACC_PK.with(|pk| matches!(&*pk.borrow(), Some((d, _)) if *d == depth)) {
+    return Ok(());
+  }
+  ACC_PK.with(|cell| *cell.borrow_mut() = None);
+  let (pk, _vk) = api::setup_accumulator(depth).map_err(err)?;
+  ACC_PK.with(|cell| *cell.borrow_mut() = Some((depth, pk)));
+  Ok(())
+}
+
+fn split_inputs(inputs: JsValue, blind: &str) -> Result<(pop_vega::circuit::SigCircuit, pop_vega::circuit::AccCircuit), JsError> {
+  let inputs: PopInputs = serde_wasm_bindgen::from_value(inputs).map_err(err)?;
+  let witness = inputs.witness().map_err(err)?;
+  Ok(api::split(witness, api::scalar_from_hex(blind).map_err(err)?))
+}
+
+/// Proves the signature half of the split proof; `blind` (hex field element) must be the
+/// one the accumulator half uses. Returns `{ proof, publicValues: [hi, lo, link] }`.
+#[wasm_bindgen(js_name = proveSignature)]
+pub fn prove_signature(inputs: JsValue, blind: &str) -> Result<JsValue, JsError> {
+  let (sig, _) = split_inputs(inputs, blind)?;
+  init_signature_prover()?;
+  let out = SIG_PK.with(|pk| api::prove_signature(pk.borrow().as_ref().expect("initialized"), sig)).map_err(err)?;
+  serde_wasm_bindgen::to_value(&ProveResult { proof: out.proof, public_values: out.public_values }).map_err(err)
+}
+
+/// Proves the accumulator half for the path in `inputs`. Returns
+/// `{ proof, publicValues: [link, root] }`.
+#[wasm_bindgen(js_name = proveAccumulator)]
+pub fn prove_accumulator(inputs: JsValue, blind: &str) -> Result<JsValue, JsError> {
+  let (_, acc) = split_inputs(inputs, blind)?;
+  init_accumulator_prover(acc.path.len())?;
+  let out = ACC_PK.with(|pk| api::prove_accumulator(&pk.borrow().as_ref().expect("initialized").1, acc)).map_err(err)?;
+  serde_wasm_bindgen::to_value(&ProveResult { proof: out.proof, public_values: out.public_values }).map_err(err)
 }
 
 /// Public values a valid proof for this challenge (base64url) and root (hex) carries.

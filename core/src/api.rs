@@ -1,7 +1,7 @@
 //! Prover/verifier entry points shared by the native tests, the setup binary and the
 //! wasm bindings. Byte fields are base64url; field elements are `0x` big-endian hex.
 
-use crate::circuit::{PopCircuit, PopWitness, MAX_AUTH_DATA, MAX_CDJ, MIN_AUTH_DATA, TREE_DEPTH};
+use crate::circuit::{self as circuit, AccCircuit, PopCircuit, PopWitness, SigCircuit, MAX_AUTH_DATA, MAX_CDJ, MIN_AUTH_DATA, TREE_DEPTH};
 use crate::gadgets::CHALLENGE_B64_LEN;
 use crate::poseidon::{scalar_from_be_bytes, scalar_to_be_bytes};
 use crate::vendor::p256_ecc::p256_order;
@@ -9,7 +9,10 @@ use crate::{Engine_, Scalar};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use num_bigint::{BigInt, Sign};
 use serde::{Deserialize, Serialize};
-use vega_prover::{traits::snark::R1CSSNARKTrait, vega_sc_zkp::VegaZkSNARK};
+use vega_prover::{
+  traits::{circuit::VegaCircuit, snark::R1CSSNARKTrait},
+  vega_sc_zkp::VegaZkSNARK,
+};
 
 pub type Snark = VegaZkSNARK<Engine_>;
 pub type ProverKey = <Snark as R1CSSNARKTrait<Engine_>>::ProverKey;
@@ -176,7 +179,24 @@ pub fn setup_with_depth(depth: usize) -> Result<(ProverKey, VerifierKey), PopErr
   if depth == 0 {
     return Err(input_err("Merkle depth must be positive"));
   }
-  Snark::setup(PopCircuit { w: PopWitness::dummy(depth) }).map_err(|e| PopError::Vega(format!("{e:?}")))
+  setup_circuit(PopCircuit { w: PopWitness::dummy(depth) })
+}
+
+/// Setup for the signature half of the split proof (independent of the Merkle depth).
+pub fn setup_signature() -> Result<(ProverKey, VerifierKey), PopError> {
+  setup_circuit(SigCircuit::dummy())
+}
+
+/// Setup for the accumulator half of the split proof at a Merkle depth.
+pub fn setup_accumulator(depth: usize) -> Result<(ProverKey, VerifierKey), PopError> {
+  if depth == 0 {
+    return Err(input_err("Merkle depth must be positive"));
+  }
+  setup_circuit(AccCircuit::dummy(depth))
+}
+
+fn setup_circuit<C: VegaCircuit<Engine_>>(c: C) -> Result<(ProverKey, VerifierKey), PopError> {
+  Snark::setup(c).map_err(|e| PopError::Vega(format!("{e:?}")))
 }
 
 /// Proof plus its public values (`[challenge_hi, challenge_lo, merkle_root]` as hex).
@@ -188,8 +208,31 @@ pub struct ProofOutput {
 }
 
 pub fn prove(pk: &ProverKey, w: PopWitness) -> Result<ProofOutput, PopError> {
-  let public_values = w.public_values().iter().map(scalar_to_hex).collect();
-  let circuit = PopCircuit { w };
+  prove_circuit(pk, PopCircuit { w })
+}
+
+/// Splits a witness for the two-proof variant; `blind` hides the leaf in the shared link.
+pub fn split(w: PopWitness, blind: Scalar) -> (SigCircuit, AccCircuit) {
+  circuit::split(w, blind)
+}
+
+/// Proves the signature half; public values `[challenge_hi, challenge_lo, link]`.
+pub fn prove_signature(pk: &ProverKey, c: SigCircuit) -> Result<ProofOutput, PopError> {
+  prove_circuit(pk, c)
+}
+
+/// Proves the accumulator half; public values `[link, merkle_root]`.
+pub fn prove_accumulator(pk: &ProverKey, c: AccCircuit) -> Result<ProofOutput, PopError> {
+  prove_circuit(pk, c)
+}
+
+fn prove_circuit<C: VegaCircuit<Engine_>>(pk: &ProverKey, circuit: C) -> Result<ProofOutput, PopError> {
+  let public_values = circuit
+    .public_values()
+    .map_err(|e| PopError::Vega(format!("{e:?}")))?
+    .iter()
+    .map(scalar_to_hex)
+    .collect();
   let prep = Snark::prep_prove(pk, circuit.clone(), false).map_err(|e| PopError::Vega(format!("{e:?}")))?;
   let (snark, _prep) = Snark::prove(pk, circuit, prep, false).map_err(|e| PopError::Vega(format!("{e:?}")))?;
   let proof = bincode::serialize(&snark).map_err(|e| PopError::Serde(e.to_string()))?;

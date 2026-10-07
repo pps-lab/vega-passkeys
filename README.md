@@ -1,88 +1,102 @@
-# Vega prover
+# Vega passkey prover
 
-The passkey-membership proof from `circuits/` (Noir), re-implemented on
-[microsoft/vega-prover](https://github.com/microsoft/vega-prover). Vega is Spartan with Hyrax
-commitments over the T-256 curve. T-256's scalar field equals P-256's base field, so the
+A zero-knowledge proof that the holder of a registered passkey signed a WebAuthn challenge,
+built on [microsoft/vega-prover](https://github.com/microsoft/vega-prover). Vega is Spartan with
+Hyrax commitments over the T-256 curve. T-256's scalar field equals P-256's base field, so the
 WebAuthn ECDSA-P256 check is native arithmetic in the circuit rather than emulated.
 
-The Noir prover stays in the repo for comparison. Select it in the widget with `?prover=noir`.
+This repository is the single source for the Vega prover. Two projects use it as a git submodule
+mounted at `vega/`:
+
+- **proof-of-person** (verena.se): the widget's prover and the server's verifier (combined proof,
+  single-threaded wasm), and the iOS app's on-device prover (`ffi/`).
+- **zk-passkeys**: the browser benchmark (`browser-prover/`, split proof, multithreaded wasm) and
+  the paper tables. Its Noir circuits are the reference implementation Vega is compared against.
 
 ## Statement
 
-The statement is the same as `circuits/src/main.nr`. Everything below is private except the
-challenge and the root.
+Everything below is private except the challenge and the root.
 
 1. `base64url(challenge)` appears in `clientDataJSON` at a private offset, inside its real length.
 2. The signed message is `authenticatorData ‖ SHA-256(clientDataJSON)`. The hash is placed using
    the same one-hot length wires that the SHA-256 gadget hashes with. The authenticatorData flags
    byte must have UV (`0x04`) set.
 3. ECDSA-P256 verifies over `SHA-256(message)` under the private key `(qx, qy)`.
-4. `commitment(qx, qy)` is a leaf of a depth-20 Merkle tree with the public root.
+4. `commitment(qx, qy)` is a leaf of a Merkle tree with the public root. The depth is the path
+   length and is fixed at setup; the deployment uses 20.
 
-Public values: `[challenge_hi, challenge_lo, merkle_root]`.
+It comes in two forms (`core/src/circuit.rs`):
 
-Differences from the Noir circuit:
+| | Circuit | Public values | Constraints (depth 20) |
+|---|---|---|---|
+| Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 260,413 |
+| Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 254,862 |
+| Split, accumulator | `AccCircuit`: 4 for the leaf inside the link | `[link, merkle_root]` | 6,131 |
+
+The split pair mirrors the Noir signature + accumulator circuits. The halves are joined by
+`link = H_link(commitment(qx, qy), blind)` with a fresh random `blind`, which hides the leaf. A
+verifier accepts the pair if both proofs verify and their `link` values are equal. The signature
+half doesn't depend on the tree, so it can be proven while the Merkle path is still being fetched.
+Each Vega proof carries a large fixed overhead, so the pair is about 150 KB, against 80 KB for the
+combined proof.
+
+Differences from the Noir circuits:
 
 - Poseidon runs over the P-256 base field, with t = 3, an x⁷ S-box, R_F = 8 and R_P = 48. BN254
   Poseidon2 isn't native here, and x⁵ isn't a permutation on this field.
-  - `scripts/poseidon_params.py` generates the constants. It reproduces the circomlib BN254
+  - `core/scripts/poseidon_params.py` generates the constants. It reproduces the circomlib BN254
     constants exactly.
-  - Domain tags separate commitments from nodes.
-  - `merkle.js` uses the same Rust code through wasm, so the server tree and the circuit cannot
-    drift apart.
-- The key commitment is no longer a public input; the server never checked it.
-- UV is enforced in-circuit (the Noir circuit checks no flags). BS is not checked.
+  - Domain tags separate commitments, nodes and links.
+  - proof-of-person's `merkle.js` uses the same Rust code through wasm, so the server tree and the
+    circuit can't drift apart.
+- The key commitment is not a public input in the combined proof.
+- UV is enforced in-circuit (the Noir circuits check no flags). BS is not checked.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `core/src/circuit.rs` | `PopCircuit` (bellpepper R1CS, about 260K constraints) |
+| `core/src/circuit.rs` | `PopCircuit`, `SigCircuit`, `AccCircuit` (bellpepper R1CS) |
 | `core/src/gadgets.rs` | base64url, one-hot selection, digest→BigNat |
 | `core/src/poseidon.rs` | native and in-circuit Poseidon |
 | `core/src/vendor/` | ECDSA-P256, P-256 point ops, BigNat and variable-length SHA-256 from [sirosfoundation/zk-cred-vega](https://github.com/sirosfoundation/zk-cred-vega) (BSD-2). That code is unaudited. |
-| `core/src/api.rs` | input parsing, setup, prove, verify |
-| `wasm/` | wasm-bindgen API: `initProver`, `prove`, `initVerifier`, `verify`, `commitment`, `merkleNode`, `expectedPublicValues` |
+| `core/src/api.rs` | input parsing, setup, prove, verify, for both forms |
+| `core/examples/` | `bench_split` (native benchmark), `bench_native`, `vk_digest` (circuit fingerprint), `gen_vector`, `keyinfo` |
+| `wasm/` | wasm-bindgen API. Combined: `initProver`, `prove`, `initVerifier`, `verify`. Split: `initSignatureProver`, `proveSignature`, `initAccumulatorProver`, `proveAccumulator`. Helpers: `commitment`, `merkleNode`, `expectedPublicValues`. Feature `threads` adds `initThreadPool`. |
+| `ffi/` | UniFFI Swift bindings and the iOS build (see `ffi/IOS_INTEGRATION.md`) |
 | `patches/` | applied to the pinned vega-prover (`web-time` instead of `std::time::Instant`, which panics in browsers) |
 
 ## Build and test
 
 ```sh
-npm run build:vega                          # fetch + patch vega-prover, build pkg/node and pkg/web
-cd vega/core && cargo test --release        # circuit positive/negative tests, prove/verify roundtrip
-npm run test:vega                           # merkle.js tree ↔ circuit root, Node wasm prove/verify
-vega/bench/compare.sh 5                     # native Noir (nargo + bb) vs Vega, same assertion
-open http://localhost:3000/bench.html       # in-browser comparison (keep the tab in front)
+./scripts/fetch-vega-prover.sh                     # pinned vega-prover + patches into third_party/
+cd core && cargo test --release                    # circuit tests (both forms, several depths), prove/verify roundtrips
+cargo run --release --example vk_digest            # combined-circuit fingerprint at depth 20 (see below)
+cargo run --release --example bench_split -- 10 > native.json   # native setup/prove/verify per depth
 ```
 
+The wasm builds are driven by the projects that use them (proof-of-person: `npm run build:vega`;
+zk-passkeys: `browser-prover`'s `npm run build:vega`):
+
+- **Single-threaded** (default): `wasm-pack build --release --target web|nodejs` in `wasm/`.
+- **Multithreaded** (`--features threads`): rayon over a `wasm-bindgen-rayon` worker pool. Needs
+  nightly Rust with `rust-src` (`-Z build-std`), atomics plus shared, imported memory, the TLS
+  exports, and a cross-origin-isolated page. See `build:vega-mt` in zk-passkeys'
+  `browser-prover/package.json` for the exact flags.
+
 Setup is transparent and deterministic. Prover and verifier each derive their key from the circuit
-at startup, so no key files are shipped. The serialized keys would be about 69 MB each, or 3.9 MB
-gzipped for the prover key.
+at startup, so no key files are shipped. The serialized combined keys would be about 69 MB each,
+or 3.9 MB gzipped for the prover key.
 
-## Results (Apple Silicon, 2026-10-01)
+**Changing the deployed circuit.** Any change to `PopCircuit`'s constraints changes verena.se's
+keys, and the server, widget and iOS app must then update together. `vk_digest` at depth 20 must
+print `[85, 242, 198, 120, 90, 190, 145, 207, …]` unless that is intended.
 
-All runs prove the same signed assertion.
+## Results (Apple M5 Pro)
 
-| | Noir / UltraHonk | Vega |
-|---|---|---|
-| Native prove, all cores | ~500 ms (+110 ms witness) | ~110 ms |
-| Native prove, 1 thread | ~2.2 s | ~245 ms |
-| Native verify | ~25 ms | ~25 ms |
-| Node wasm, 1 thread: setup / prove / verify | — | 0.8 s / 1.0 s / 0.2 s |
-| Proof size | 14.6 KB | 78 KB |
-| Verifier memory (Node) | — | ~470 MB RSS |
-
-Notes:
-
-- Noir native numbers come from the `bb` CLI, so they include process start-up and loading.
-- Measured in Chrome from a background tab: setup 4.1 s, prove 4.7 s. Background tabs are
-  throttled about 3.5× (a plain JS loop runs 3.5× slower than in Node), so expect roughly 1–1.5 s
-  in a foreground tab.
-- No browser Noir number yet. The committed circuit was compiled with nargo 1.0.0-beta.21, but the
-  widget uses `noir_js` 1.0.0-beta.5 / bb.js 0.72, which can't deserialize it ("Failed to
-  deserialize circuit"). This was already the case before the Vega work.
-- Vega's prep-state reuse makes re-proving the *same* witness about 40% faster. It doesn't help a
-  new assertion, because the ECDSA/Poseidon witness changes completely.
+Native (`bench_split`, all cores, depth 20): combined 146 ms prove / 25 ms verify; signature half
+125 / 24 ms; accumulator half 39 / 15 ms. Browser and per-depth results are in zk-passkeys
+(`browser-prover/README.md`, `scripts/plots/`).
 
 ## Caveats
 
@@ -90,5 +104,6 @@ Notes:
   their own review found two critical ECDSA bugs, now fixed. Get the circuit reviewed before it
   protects real users.
 - The Poseidon parameters skip the reference script's invariant-subspace check on the MDS matrix.
-- The Noir path's proofs fail the server's root check, because its tree is BN254 Poseidon2.
 - The verifier key takes about 470 MB in Node on Fly's 1 GB VM.
+- Multithreading in wasm stops paying off early (at depth 20 in Chrome: 946 ms on 1 thread,
+  383 ms on 8), so most of the remaining prover time is serial.
