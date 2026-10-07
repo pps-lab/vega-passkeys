@@ -1,45 +1,58 @@
 //! wasm-bindgen surface for the browser prover (`--target web`) and the Node verifier
 //! (`--target nodejs`). Setup is transparent and deterministic, so each side derives its
 //! key from the circuit at init instead of downloading it.
+//!
+//! The circuit shape depends on the Merkle depth, so each side holds the key for one depth
+//! at a time (a prover key is ~70 MB in memory) and re-derives it when the depth changes.
 
 use pop_vega::api::{self, PopInputs, ProverKey, VerifierKey};
+use pop_vega::circuit::TREE_DEPTH;
 use pop_vega::poseidon;
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
 thread_local! {
-  static PK: RefCell<Option<ProverKey>> = const { RefCell::new(None) };
-  static VK: RefCell<Option<VerifierKey>> = const { RefCell::new(None) };
+  static PK: RefCell<Option<(usize, ProverKey)>> = const { RefCell::new(None) };
+  static VK: RefCell<Option<(usize, VerifierKey)>> = const { RefCell::new(None) };
 }
 
 fn err(e: impl std::fmt::Display) -> JsError {
   JsError::new(&e.to_string())
 }
 
+/// `initThreadPool(n)`: spawns the rayon pool. Call once after `init()`, before proving.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 #[wasm_bindgen(start)]
 pub fn start() {
   console_error_panic_hook::set_once();
 }
 
-/// Derives the prover key. Idempotent.
+/// Derives the prover key for a Merkle depth (default 20). Idempotent per depth.
 #[wasm_bindgen(js_name = initProver)]
-pub fn init_prover() -> Result<(), JsError> {
-  if PK.with(|pk| pk.borrow().is_some()) {
+pub fn init_prover(depth: Option<usize>) -> Result<(), JsError> {
+  let depth = depth.unwrap_or(TREE_DEPTH);
+  if PK.with(|pk| matches!(&*pk.borrow(), Some((d, _)) if *d == depth)) {
     return Ok(());
   }
-  let (pk, _vk) = api::setup().map_err(err)?;
-  PK.with(|cell| *cell.borrow_mut() = Some(pk));
+  // Drop the old key before deriving the new one, so both are never resident.
+  PK.with(|cell| *cell.borrow_mut() = None);
+  let (pk, _vk) = api::setup_with_depth(depth).map_err(err)?;
+  PK.with(|cell| *cell.borrow_mut() = Some((depth, pk)));
   Ok(())
 }
 
-/// Derives the verifier key. Idempotent.
+/// Derives the verifier key for a Merkle depth (default 20). Idempotent per depth.
 #[wasm_bindgen(js_name = initVerifier)]
-pub fn init_verifier() -> Result<(), JsError> {
-  if VK.with(|vk| vk.borrow().is_some()) {
+pub fn init_verifier(depth: Option<usize>) -> Result<(), JsError> {
+  let depth = depth.unwrap_or(TREE_DEPTH);
+  if VK.with(|vk| matches!(&*vk.borrow(), Some((d, _)) if *d == depth)) {
     return Ok(());
   }
-  let (_pk, vk) = api::setup().map_err(err)?;
-  VK.with(|cell| *cell.borrow_mut() = Some(vk));
+  VK.with(|cell| *cell.borrow_mut() = None);
+  let (_pk, vk) = api::setup_with_depth(depth).map_err(err)?;
+  VK.with(|cell| *cell.borrow_mut() = Some((depth, vk)));
   Ok(())
 }
 
@@ -58,24 +71,24 @@ mod serde_bytes_compat {
   }
 }
 
-/// Proves a WebAuthn assertion (see `PopInputs` for the shape). Returns
-/// `{ proof: Uint8Array, publicValues: string[] }`.
+/// Proves a WebAuthn assertion (see `PopInputs` for the shape); the depth is the Merkle
+/// path's length. Returns `{ proof: Uint8Array, publicValues: string[] }`.
 #[wasm_bindgen]
 pub fn prove(inputs: JsValue) -> Result<JsValue, JsError> {
-  init_prover()?;
   let inputs: PopInputs = serde_wasm_bindgen::from_value(inputs).map_err(err)?;
   let witness = inputs.witness().map_err(err)?;
-  let out = PK.with(|pk| api::prove(pk.borrow().as_ref().expect("initialized"), witness)).map_err(err)?;
+  init_prover(Some(witness.path.len()))?;
+  let out = PK.with(|pk| api::prove(&pk.borrow().as_ref().expect("initialized").1, witness)).map_err(err)?;
   let result = ProveResult { proof: out.proof, public_values: out.public_values };
   serde_wasm_bindgen::to_value(&result).map_err(err)
 }
 
-/// Verifies a proof; returns its public values `[challenge_hi, challenge_lo, root]`
-/// as hex, or throws.
+/// Verifies a proof for a Merkle depth (default 20); returns its public values
+/// `[challenge_hi, challenge_lo, root]` as hex, or throws.
 #[wasm_bindgen]
-pub fn verify(proof: &[u8]) -> Result<Vec<String>, JsError> {
-  init_verifier()?;
-  VK.with(|vk| api::verify(vk.borrow().as_ref().expect("initialized"), proof)).map_err(err)
+pub fn verify(proof: &[u8], depth: Option<usize>) -> Result<Vec<String>, JsError> {
+  init_verifier(depth)?;
+  VK.with(|vk| api::verify(&vk.borrow().as_ref().expect("initialized").1, proof)).map_err(err)
 }
 
 /// Public values a valid proof for this challenge (base64url) and root (hex) carries.

@@ -23,6 +23,14 @@ pub fn fixture_with(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32) -> Fixt
 }
 
 pub fn fixture_with_flags(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, flags: u8) -> Fixture {
+  fixture_full(sk, challenge, leaf_index, flags, TREE_DEPTH)
+}
+
+pub fn fixture_at_depth(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, depth: usize) -> Fixture {
+  fixture_full(sk, challenge, leaf_index, 0x05, depth)
+}
+
+pub fn fixture_full(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, flags: u8, depth: usize) -> Fixture {
   let signing_key = SigningKey::from_bytes(sk.into()).unwrap();
   let point = signing_key.verifying_key().to_encoded_point(false);
   let (x, y) = (point.x().unwrap().to_vec(), point.y().unwrap().to_vec());
@@ -43,9 +51,9 @@ pub fn fixture_with_flags(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, f
   let mut cur = poseidon::commitment(scalar(&x), scalar(&y));
   let mut path_elements = Vec::new();
   let mut path_indices = Vec::new();
-  for level in 0..TREE_DEPTH {
+  for level in 0..depth {
     let sib = poseidon::node(Scalar::from(level as u64 + 1000), Scalar::from(3u64));
-    let right = (leaf_index >> level) & 1 == 1;
+    let right = level < 32 && (leaf_index >> level) & 1 == 1;
     cur = if right { poseidon::node(sib, cur) } else { poseidon::node(cur, sib) };
     path_elements.push(scalar_to_hex(&sib));
     path_indices.push(right as u8);

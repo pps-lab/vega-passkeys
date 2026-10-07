@@ -2,7 +2,8 @@
 //!
 //! Private: P-256 public key (qx, qy), signature (r, s), the signed message
 //! `authenticatorData || SHA-256(clientDataJSON)`, clientDataJSON, the challenge's
-//! offset inside it, and a depth-20 Merkle path.
+//! offset inside it, and a Merkle path. The tree depth is the path length, fixed at setup
+//! (`api::setup_with_depth`); keys for one depth do not accept proofs for another.
 //! Public: `[challenge_hi, challenge_lo, merkle_root]` (challenge as two 128-bit halves).
 //!
 //! Checks, mirroring `circuits/src/main.nr`:
@@ -30,6 +31,7 @@ use ff::Field;
 use num_bigint::BigInt;
 use vega_prover::traits::circuit::VegaCircuit;
 
+/// Depth of the proof-of-person deployment's tree; the zk-passkeys benchmarks sweep 20..=28.
 pub const TREE_DEPTH: usize = 20;
 /// authenticatorData is at least rpIdHash (32) + flags (1) + signCount (4).
 pub const MIN_AUTH_DATA: usize = 37;
@@ -53,15 +55,15 @@ pub struct PopWitness {
   pub r: BigInt,
   pub s: BigInt,
   pub s_inv: BigInt,
-  pub path: [Scalar; TREE_DEPTH],
+  pub path: Vec<Scalar>,
   /// `true` when the current node is the right child at that level.
-  pub indices: [bool; TREE_DEPTH],
+  pub indices: Vec<bool>,
 }
 
 impl PopWitness {
   /// A structurally valid but unsatisfying witness, used only to derive the R1CS shape
-  /// at setup. The shape does not depend on witness values.
-  pub fn dummy() -> Self {
+  /// at setup. The shape depends only on `depth`, not on witness values.
+  pub fn dummy(depth: usize) -> Self {
     // Q = G keeps witness computation (point arithmetic, inversions) panic-free.
     let (gx, gy) = p256_generator::<Scalar>();
     PopWitness {
@@ -74,8 +76,8 @@ impl PopWitness {
       r: BigInt::from(1),
       s: BigInt::from(1),
       s_inv: BigInt::from(1),
-      path: [Scalar::ZERO; TREE_DEPTH],
-      indices: [false; TREE_DEPTH],
+      path: vec![Scalar::ZERO; depth],
+      indices: vec![false; depth],
     }
   }
 
@@ -132,6 +134,7 @@ impl PopCircuit {
     assert!(w.msg.len() >= MIN_AUTH_DATA + 32 && w.msg.len() <= MAX_MSG, "message length out of range");
     assert!(w.cdj.len() <= MAX_CDJ, "clientDataJSON too long");
     assert!(w.challenge_offset + CHALLENGE_B64_LEN <= MAX_CDJ, "challenge offset out of range");
+    assert_eq!(w.path.len(), w.indices.len(), "Merkle path and indices differ in length");
 
     // Public challenge.
     let chal_bits = alloc_byte_bits(cs.namespace(|| "challenge"), &w.challenge)?;
@@ -207,7 +210,7 @@ impl PopCircuit {
 
     // 4. Commitment and Merkle membership.
     let mut cur = hash2_gadget(cs.namespace(|| "commitment"), TAG_COMMITMENT, &qx, &qy)?;
-    for level in 0..TREE_DEPTH {
+    for level in 0..w.path.len() {
       let mut cs = cs.namespace(|| format!("merkle {level}"));
       let sib = AllocatedNum::alloc(cs.namespace(|| "sibling"), || Ok(w.path[level]))?;
       let right = AllocatedBit::alloc(cs.namespace(|| "is right"), Some(w.indices[level]))?;

@@ -134,12 +134,13 @@ impl PopInputs {
     }
     let s_inv = s.modpow(&(&n - 2), &n);
 
-    if self.path_elements.len() != TREE_DEPTH || self.path_indices.len() != TREE_DEPTH {
-      return Err(input_err(format!("Merkle path must have depth {TREE_DEPTH}")));
+    let depth = self.path_elements.len();
+    if depth == 0 || self.path_indices.len() != depth {
+      return Err(input_err("Merkle path and indices must be non-empty and of equal length"));
     }
-    let mut path = [Scalar::from(0u64); TREE_DEPTH];
-    let mut indices = [false; TREE_DEPTH];
-    for i in 0..TREE_DEPTH {
+    let mut path = vec![Scalar::from(0u64); depth];
+    let mut indices = vec![false; depth];
+    for i in 0..depth {
       path[i] = scalar_from_hex(&self.path_elements[i])?;
       indices[i] = match self.path_indices[i] {
         0 => false,
@@ -164,9 +165,18 @@ impl PopInputs {
   }
 }
 
-/// Transparent setup: derives the keys from the circuit shape alone.
+/// Transparent setup for the default depth (`TREE_DEPTH`).
 pub fn setup() -> Result<(ProverKey, VerifierKey), PopError> {
-  Snark::setup(PopCircuit { w: PopWitness::dummy() }).map_err(|e| PopError::Vega(format!("{e:?}")))
+  setup_with_depth(TREE_DEPTH)
+}
+
+/// Transparent setup: derives the keys from the circuit shape alone, which is fixed by the
+/// Merkle depth.
+pub fn setup_with_depth(depth: usize) -> Result<(ProverKey, VerifierKey), PopError> {
+  if depth == 0 {
+    return Err(input_err("Merkle depth must be positive"));
+  }
+  Snark::setup(PopCircuit { w: PopWitness::dummy(depth) }).map_err(|e| PopError::Vega(format!("{e:?}")))
 }
 
 /// Proof plus its public values (`[challenge_hi, challenge_lo, merkle_root]` as hex).

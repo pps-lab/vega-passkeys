@@ -3,7 +3,7 @@ mod common;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bellpepper_core::test_cs::TestConstraintSystem;
 use pop_vega::api::{expected_public_values, scalar_to_hex};
-use pop_vega::circuit::{PopCircuit, PopWitness};
+use pop_vega::circuit::{PopCircuit, PopWitness, TREE_DEPTH};
 use pop_vega::Scalar;
 
 fn satisfied(w: PopWitness) -> bool {
@@ -120,5 +120,16 @@ fn shape_is_witness_independent() {
     (cs.num_constraints(), cs.num_inputs())
   };
   let real = common::fixture().inputs.witness().unwrap();
-  assert_eq!(count(PopWitness::dummy()), count(real));
+  assert_eq!(count(PopWitness::dummy(TREE_DEPTH)), count(real));
+}
+
+#[test]
+fn other_depths_satisfy() {
+  for depth in [22, 28] {
+    let f = common::fixture_at_depth(&[9u8; 32], [1u8; 32], 5, depth);
+    let w = f.inputs.witness().unwrap();
+    assert_eq!(w.path.len(), depth);
+    assert_eq!(w.root(), f.root);
+    assert!(satisfied(w), "depth {depth}");
+  }
 }
