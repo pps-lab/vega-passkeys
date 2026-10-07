@@ -3,7 +3,8 @@
 //! is where benchmark tables take it from.
 //!
 //! Usage: cargo run --release --example bench_split -- [runs] [depth...] > results.json
-//! (defaults: 10 runs, depths 20 22 24 26 28). RAYON_NUM_THREADS limits the thread pool.
+//! (defaults: 10 runs, depths 20 22 24 26 28). Each measurement is preceded by one
+//! untimed warm-up call; setup is timed once, warm. RAYON_NUM_THREADS limits the thread pool.
 #[path = "../tests/common/mod.rs"]
 mod common;
 
@@ -19,7 +20,10 @@ fn stats(mut xs: Vec<f64>) -> String {
   format!(r#"{{"mean":{mean:.3},"median":{median:.3},"min":{:.3},"max":{:.3},"samples":[{samples}]}}"#, xs[0], xs[n - 1])
 }
 
+/// `runs` timed calls of `f`, after one untimed warm-up call (the first call of each
+/// operation pays for page faults and cold caches).
 fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (Vec<f64>, T) {
+  f();
   let mut out = None;
   let xs = (0..runs)
     .map(|_| {
