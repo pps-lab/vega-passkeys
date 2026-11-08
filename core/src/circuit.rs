@@ -1,15 +1,18 @@
 //! `PopCircuit`: the passkey-membership statement.
 //!
 //! Private: P-256 public key (qx, qy), signature (r, s), the signed message
-//! `authenticatorData || SHA-256(clientDataJSON)`, clientDataJSON, the challenge's
-//! offset inside it, and a Merkle path. The tree depth is the path length, fixed at setup
-//! (`api::setup_with_depth`); keys for one depth do not accept proofs for another.
+//! `authenticatorData || SHA-256(clientDataJSON)`, clientDataJSON, and a Merkle path. The
+//! tree depth is the path length, fixed at setup (`api::setup_with_depth`); keys for one
+//! depth do not accept proofs for another.
 //! Public: `[challenge_hi, challenge_lo, merkle_root]` (challenge as two 128-bit halves).
 //!
 //! Checks, mirroring `circuits/src/main.nr`:
-//! 1. base64url(challenge) appears in clientDataJSON at the offset, inside its real length;
+//! 1. clientDataJSON is `{"type":"webauthn.get","challenge":"` ‖ base64url(challenge) ‖ `"`
+//!    ‖ …, i.e. the WebAuthn client-data serialization with the challenge as the value of
+//!    the `challenge` member (the spec fixes the member order, so the prefix is a constant),
+//!    and the closing quote lies inside its real length;
 //! 2. the signed message ends with SHA-256(clientDataJSON) (same length wires as the hash),
-//!    and its authenticatorData has the UV flag set;
+//!    and its authenticatorData has the UP and UV flags set;
 //! 3. ECDSA-P256 verifies (r, s) over SHA-256(message) under (qx, qy);
 //! 4. Poseidon commitment(qx, qy) is a leaf of the tree with the public root.
 //!
@@ -21,8 +24,7 @@
 //! lets the signature proof start before the Merkle path is known.
 
 use crate::gadgets::{
-  alloc_byte_bits, alloc_one_hot, b64url_encode_challenge, bits_be_to_bignat, bits_to_lc, byte_lc, enforce_selected_eq,
-  CHALLENGE_B64_LEN,
+  alloc_byte_bits, b64url_encode_challenge, bits_be_to_bignat, bits_to_lc, byte_lc, enforce_selected_eq, CHALLENGE_B64_LEN,
 };
 use crate::poseidon::{self, hash2_gadget, TAG_COMMITMENT, TAG_LINK, TAG_NODE};
 use crate::vendor::ecdsa::verify_ecdsa_p256_with_digest;
@@ -30,7 +32,7 @@ use crate::vendor::p256_ecc::p256_generator;
 use crate::vendor::sha256_var::{sha256_var_sized_with_selector, terminal_block_for_len};
 use crate::{Engine_, Scalar};
 use bellpepper_core::{
-  boolean::{AllocatedBit, Boolean},
+  boolean::AllocatedBit,
   num::AllocatedNum,
   ConstraintSystem, LinearCombination, SynthesisError,
 };
@@ -47,6 +49,18 @@ pub const MAX_MSG: usize = MAX_AUTH_DATA + 32;
 pub const MSG_BLOCKS: usize = terminal_block_for_len(MAX_MSG);
 pub const MAX_CDJ: usize = 256;
 pub const CDJ_BLOCKS: usize = terminal_block_for_len(MAX_CDJ);
+/// How a client serializes clientDataJSON for an assertion (WebAuthn §5.8.1.1): `type` first,
+/// then `challenge`, so base64url(challenge) always starts at byte `CHALLENGE_OFFSET`.
+pub const CDJ_PREFIX: &[u8] = b"{\"type\":\"webauthn.get\",\"challenge\":\"";
+pub const CHALLENGE_OFFSET: usize = CDJ_PREFIX.len();
+/// Shortest clientDataJSON the circuit accepts: prefix, challenge, closing quote.
+pub const MIN_CDJ: usize = CHALLENGE_OFFSET + CHALLENGE_B64_LEN + 1;
+/// authenticatorData flags byte (`authData[32]`), MSB-first bit positions.
+pub const FLAGS_BYTE: usize = 32;
+/// UP (0x01): the user was present.
+pub const FLAG_UP_BIT: usize = 7;
+/// UV (0x04): the user was verified.
+pub const FLAG_UV_BIT: usize = 5;
 
 /// All witness data for one proof. Built by `api::PopInputs::witness`.
 #[derive(Clone, Debug)]
@@ -56,7 +70,6 @@ pub struct PopWitness {
   pub msg: Vec<u8>,
   /// clientDataJSON, unpadded.
   pub cdj: Vec<u8>,
-  pub challenge_offset: usize,
   pub qx: Scalar,
   pub qy: Scalar,
   pub r: BigInt,
@@ -73,11 +86,13 @@ impl PopWitness {
   pub fn dummy(depth: usize) -> Self {
     // Q = G keeps witness computation (point arithmetic, inversions) panic-free.
     let (gx, gy) = p256_generator::<Scalar>();
+    let mut cdj = CDJ_PREFIX.to_vec();
+    cdj.extend([b'A'; CHALLENGE_B64_LEN]);
+    cdj.extend(b"\"}");
     PopWitness {
       challenge: [0; 32],
       msg: vec![0; MIN_AUTH_DATA + 32],
-      cdj: vec![b'a'; 64],
-      challenge_offset: 0,
+      cdj,
       qx: gx,
       qy: gy,
       r: BigInt::from(1),
@@ -142,7 +157,6 @@ fn synthesize_signature<CS: ConstraintSystem<Scalar>>(
 ) -> Result<(AllocatedNum<Scalar>, AllocatedNum<Scalar>), SynthesisError> {
   assert!(w.msg.len() >= MIN_AUTH_DATA + 32 && w.msg.len() <= MAX_MSG, "message length out of range");
   assert!(w.cdj.len() <= MAX_CDJ, "clientDataJSON too long");
-  assert!(w.challenge_offset + CHALLENGE_B64_LEN <= MAX_CDJ, "challenge offset out of range");
 
   // Public challenge.
   let chal_bits = alloc_byte_bits(cs.namespace(|| "challenge"), &w.challenge)?;
@@ -151,45 +165,43 @@ fn synthesize_signature<CS: ConstraintSystem<Scalar>>(
   inputize_lc(cs.namespace(|| "challenge hi"), hi_lc, hi_val)?;
   inputize_lc(cs.namespace(|| "challenge lo"), lo_lc, lo_val)?;
 
-  // 1. base64url(challenge) at challenge_offset in clientDataJSON.
+  // 1. clientDataJSON = CDJ_PREFIX ‖ base64url(challenge) ‖ '"' ‖ …. Every byte position is
+  // fixed, so each check is one constraint on the byte's linear combination.
   let cdj_bits = alloc_byte_bits(cs.namespace(|| "cdj"), &pad(&w.cdj, MAX_CDJ))?;
   let (cdj_hash, cdj_active, _) =
     sha256_var_sized_with_selector(cs.namespace(|| "sha256(cdj)"), &cdj_bits, w.cdj.len(), MAX_CDJ, CDJ_BLOCKS)?;
-  let cdj_bytes: Vec<_> = (0..MAX_CDJ).map(|i| byte_lc::<CS>(&cdj_bits, i)).collect();
-  let chars = b64url_encode_challenge(cs.namespace(|| "b64url"), &chal_bits)?;
-  let n_offsets = MAX_CDJ - CHALLENGE_B64_LEN + 1;
-  let off_sel: Vec<Boolean> = alloc_one_hot(cs.namespace(|| "offset"), n_offsets, w.challenge_offset)?
-    .into_iter()
-    .map(Boolean::from)
-    .collect();
-  for (j, ch) in chars.iter().enumerate() {
-    enforce_selected_eq(
-      cs.namespace(|| format!("challenge char {j}")),
-      &off_sel,
-      &cdj_bytes[j..j + n_offsets],
-      ch,
-    )?;
+  let enforce_byte = |cs: &mut CS, name: String, i: usize, target: LinearCombination<Scalar>| {
+    let (byte, _) = byte_lc::<CS>(&cdj_bits, i);
+    cs.enforce(|| name, |_| byte, |lc| lc + CS::one(), |_| target);
+  };
+  let constant = |c: u8| LinearCombination::zero() + (Scalar::from(c as u64), CS::one());
+  for (i, &c) in CDJ_PREFIX.iter().enumerate() {
+    enforce_byte(cs, format!("cdj prefix {i}"), i, constant(c));
   }
-  // The last challenge character must lie inside the real clientDataJSON; bytes past its
-  // length are unconstrained padding that the hash never reads.
-  let active: Vec<_> = cdj_active[CHALLENGE_B64_LEN - 1..]
-    .iter()
-    .map(|b| (b.lc(CS::one(), Scalar::ONE), b.get_value().map(|v| if v { Scalar::ONE } else { Scalar::ZERO })))
-    .collect();
-  enforce_selected_eq(
-    cs.namespace(|| "challenge within cdj"),
-    &off_sel,
-    &active,
-    &(LinearCombination::zero() + CS::one()),
-  )?;
+  let chars = b64url_encode_challenge(cs.namespace(|| "b64url"), &chal_bits)?;
+  for (j, ch) in chars.into_iter().enumerate() {
+    enforce_byte(cs, format!("challenge char {j}"), CHALLENGE_OFFSET + j, ch);
+  }
+  // The challenge member's value is exactly the 43 characters: a quote follows them.
+  enforce_byte(cs, "challenge closing quote".into(), MIN_CDJ - 1, constant(b'"'));
+  // That quote must lie inside the real clientDataJSON; bytes past its length are
+  // unconstrained padding that the hash never reads.
+  cs.enforce(
+    || "challenge within cdj",
+    |_| cdj_active[MIN_CDJ - 1].lc(CS::one(), Scalar::ONE),
+    |lc| lc + CS::one(),
+    |lc| lc + CS::one(),
+  );
 
   // 2. message = authData || SHA-256(cdj): the hash sits in the last 32 bytes of the
   // hashed length, selected by the same one-hot length wires the SHA gadget uses.
   let msg_bits = alloc_byte_bits(cs.namespace(|| "msg"), &pad(&w.msg, MAX_MSG))?;
-  // authData's flags byte is msg[32]; require UV (0x04, MSB-first bit 5). These wires are
-  // hashed and signed below, so the flag is bound to the signature.
-  let uv = &msg_bits[32 * 8 + 5];
-  cs.enforce(|| "flags.UV", |_| uv.lc(CS::one(), Scalar::ONE), |lc| lc + CS::one(), |lc| lc + CS::one());
+  // authData's flags byte is msg[32]; require UP (0x01) and UV (0x04). These wires are
+  // hashed and signed below, so the flags are bound to the signature.
+  for (name, bit) in [("flags.UP", FLAG_UP_BIT), ("flags.UV", FLAG_UV_BIT)] {
+    let flag = &msg_bits[FLAGS_BYTE * 8 + bit];
+    cs.enforce(|| name, |_| flag.lc(CS::one(), Scalar::ONE), |lc| lc + CS::one(), |lc| lc + CS::one());
+  }
   let (z_bits, _msg_active, len_sel) =
     sha256_var_sized_with_selector(cs.namespace(|| "sha256(msg)"), &msg_bits, w.msg.len(), MAX_MSG, MSG_BLOCKS)?;
   let too_short = len_sel[..MIN_AUTH_DATA + 32]

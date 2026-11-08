@@ -89,11 +89,12 @@ directly) still works but reveals the credential to the server; switch away from
 ## 5. Constraints and errors
 
 - The circuit limits are authData 37–128 bytes and clientData ≤ 256 bytes. The current synthetic
-  37-byte authData and `{"challenge":"<challenge>"}` clientData fit.
-- authData byte 32 (flags) must have UV (`0x04`) set; the app uses `0x05`. Otherwise `prove`
-  throws `InvalidInput`.
-- The challenge must base64url-decode to exactly 32 bytes and appear verbatim in clientData.
-  Anything else throws `InvalidInput`.
+  37-byte authData and `{"type":"webauthn.get","challenge":"<challenge>"}` clientData fit.
+- authData byte 32 (flags) must have UP (`0x01`) and UV (`0x04`) set; the app uses `0x05`.
+  Otherwise `prove` throws `InvalidInput`.
+- The challenge must base64url-decode to exactly 32 bytes, and clientData must start with
+  `{"type":"webauthn.get","challenge":"` followed by exactly the challenge string and a closing
+  quote (the WebAuthn client-data serialization). Anything else throws `InvalidInput`.
 - Don't call `prove` with stale data. Fetch `/v1/pubkeys` after `verify/start`, because the root
   must match the server's tree at verification time.
 - Handle server responses:

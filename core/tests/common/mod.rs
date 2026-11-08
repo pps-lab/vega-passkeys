@@ -30,15 +30,24 @@ pub fn fixture_at_depth(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, dep
   fixture_full(sk, challenge, leaf_index, 0x05, depth)
 }
 
+/// The clientDataJSON a browser serializes for an assertion with this challenge.
+pub fn client_data_json(challenge: [u8; 32]) -> String {
+  let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge);
+  format!(r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://verena.se","crossOrigin":false}}"#)
+}
+
 pub fn fixture_full(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, flags: u8, depth: usize) -> Fixture {
+  fixture_with_cdj(sk, challenge, leaf_index, flags, depth, client_data_json(challenge))
+}
+
+/// A genuinely signed assertion over an arbitrary clientDataJSON (which `witness()` may
+/// reject; tests bypass that to exercise the circuit's own checks).
+pub fn fixture_with_cdj(sk: &[u8; 32], challenge: [u8; 32], leaf_index: u32, flags: u8, depth: usize, cdj: String) -> Fixture {
   let signing_key = SigningKey::from_bytes(sk.into()).unwrap();
   let point = signing_key.verifying_key().to_encoded_point(false);
   let (x, y) = (point.x().unwrap().to_vec(), point.y().unwrap().to_vec());
 
   let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge);
-  let cdj = format!(
-    r#"{{"type":"webauthn.get","challenge":"{challenge_b64}","origin":"https://verena.se","crossOrigin":false}}"#
-  );
   let mut auth_data = Sha256::digest(b"verena.se").to_vec();
   auth_data.push(flags);
   auth_data.extend_from_slice(&[0, 0, 0, 1]);

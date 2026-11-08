@@ -1,7 +1,10 @@
 //! Prover/verifier entry points shared by the native tests, the setup binary and the
 //! wasm bindings. Byte fields are base64url; field elements are `0x` big-endian hex.
 
-use crate::circuit::{self as circuit, AccCircuit, PopCircuit, PopWitness, SigCircuit, MAX_AUTH_DATA, MAX_CDJ, MIN_AUTH_DATA, TREE_DEPTH};
+use crate::circuit::{
+  self as circuit, AccCircuit, PopCircuit, PopWitness, SigCircuit, CDJ_PREFIX, CHALLENGE_OFFSET, FLAGS_BYTE, MAX_AUTH_DATA,
+  MAX_CDJ, MIN_AUTH_DATA, MIN_CDJ, TREE_DEPTH,
+};
 use crate::gadgets::CHALLENGE_B64_LEN;
 use crate::poseidon::{scalar_from_be_bytes, scalar_to_be_bytes};
 use crate::vendor::p256_ecc::p256_order;
@@ -114,18 +117,26 @@ impl PopInputs {
     if auth_data.len() < MIN_AUTH_DATA || auth_data.len() > MAX_AUTH_DATA {
       return Err(input_err(format!("authenticatorData must be {MIN_AUTH_DATA}..={MAX_AUTH_DATA} bytes")));
     }
-    if auth_data[32] & 0x04 == 0 {
+    let flags = auth_data[FLAGS_BYTE];
+    if flags & 0x01 == 0 {
+      return Err(input_err("authenticatorData UP flag not set"));
+    }
+    if flags & 0x04 == 0 {
       return Err(input_err("authenticatorData UV flag not set"));
     }
     if cdj.len() > MAX_CDJ {
       return Err(input_err(format!("clientDataJSON longer than {MAX_CDJ} bytes")));
     }
+    // The circuit checks these same byte positions; fail early with a readable reason.
+    if cdj.len() < MIN_CDJ || !cdj.starts_with(CDJ_PREFIX) {
+      return Err(input_err("clientDataJSON does not start with the webauthn.get challenge prefix"));
+    }
     let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge);
     debug_assert_eq!(challenge_b64.len(), CHALLENGE_B64_LEN);
-    let challenge_offset = cdj
-      .windows(CHALLENGE_B64_LEN)
-      .position(|w| w == challenge_b64.as_bytes())
-      .ok_or_else(|| input_err("challenge not found in clientDataJSON"))?;
+    let value = &cdj[CHALLENGE_OFFSET..MIN_CDJ];
+    if &value[..CHALLENGE_B64_LEN] != challenge_b64.as_bytes() || value[CHALLENGE_B64_LEN] != b'"' {
+      return Err(input_err("clientDataJSON challenge does not match"));
+    }
 
     let mut msg = auth_data;
     msg.extend_from_slice(&sha256(&cdj));
@@ -156,7 +167,6 @@ impl PopInputs {
       challenge,
       msg,
       cdj,
-      challenge_offset,
       qx: scalar_from_32(&b64url(&self.pub_key_x)?)?,
       qy: scalar_from_32(&b64url(&self.pub_key_y)?)?,
       r,

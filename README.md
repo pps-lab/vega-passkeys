@@ -17,10 +17,12 @@ mounted at `vega/`:
 
 Everything below is private except the challenge and the root.
 
-1. `base64url(challenge)` appears in `clientDataJSON` at a private offset, inside its real length.
+1. `clientDataJSON` is `{"type":"webauthn.get","challenge":"` ‖ `base64url(challenge)` ‖ `"` ‖ …,
+   with the closing quote inside its real length. WebAuthn fixes the member order of the client
+   data serialization, so the prefix is a constant and the challenge always starts at byte 36.
 2. The signed message is `authenticatorData ‖ SHA-256(clientDataJSON)`. The hash is placed using
    the same one-hot length wires that the SHA-256 gadget hashes with. The authenticatorData flags
-   byte must have UV (`0x04`) set.
+   byte must have UP (`0x01`) and UV (`0x04`) set.
 3. ECDSA-P256 verifies over `SHA-256(message)` under the private key `(qx, qy)`.
 4. `commitment(qx, qy)` is a leaf of a Merkle tree with the public root. The depth is the path
    length and is fixed at setup; the deployment uses 20.
@@ -29,8 +31,8 @@ It comes in two forms (`core/src/circuit.rs`):
 
 | | Circuit | Public values | Constraints (depth 20) |
 |---|---|---|---|
-| Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 260,413 |
-| Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 254,862 |
+| Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 250,820 |
+| Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 245,269 |
 | Split, accumulator | `AccCircuit`: 4 for the leaf inside the link | `[link, merkle_root]` | 6,131 |
 
 The split pair mirrors the Noir signature + accumulator circuits. The halves are joined by
@@ -50,7 +52,9 @@ Differences from the Noir circuits:
   - proof-of-person's `merkle.js` uses the same Rust code through wasm, so the server tree and the
     circuit can't drift apart.
 - The key commitment is not a public input in the combined proof.
-- UV is enforced in-circuit (the Noir circuits check no flags). BS is not checked.
+- The `webauthn.get` prefix and the exact challenge value are enforced; the Noir circuits accept
+  the challenge at any private offset. UP and UV are enforced in-circuit (the Noir circuits check
+  no flags). BS is not checked.
 
 ## Layout
 

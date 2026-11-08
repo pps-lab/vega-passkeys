@@ -5,6 +5,7 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use pop_vega::api::{expected_public_values, scalar_to_hex};
 use pop_vega::circuit::{split, AccCircuit, PopCircuit, PopWitness, SigCircuit, TREE_DEPTH};
 use pop_vega::Scalar;
+use sha2::{Digest, Sha256};
 
 fn satisfied(w: PopWitness) -> bool {
   let mut cs = TestConstraintSystem::<Scalar>::new();
@@ -61,11 +62,60 @@ fn different_public_challenge_fails() {
   assert!(!satisfied(w));
 }
 
+/// A witness whose signature is genuinely over `cdj`, even when `witness()` rejects that
+/// clientDataJSON: build the inputs with the standard one, then swap the signed one back in.
+/// Only the circuit's clientDataJSON checks can then fail.
+fn signed_witness_with_cdj(cdj: &str) -> PopWitness {
+  let challenge = [42u8; 32];
+  let f = common::fixture_with_cdj(&[7u8; 32], challenge, 5, 0x05, TREE_DEPTH, cdj.to_string());
+  let mut inputs = f.inputs.clone();
+  inputs.client_data_json = URL_SAFE_NO_PAD.encode(common::client_data_json(challenge));
+  let mut w = inputs.witness().unwrap();
+  w.cdj = cdj.as_bytes().to_vec();
+  let n = w.msg.len();
+  w.msg[n - 32..].copy_from_slice(&Sha256::digest(cdj.as_bytes()));
+  w
+}
+
 #[test]
-fn wrong_challenge_offset_fails() {
-  let mut w = common::fixture().inputs.witness().unwrap();
-  w.challenge_offset += 1;
-  assert!(!satisfied(w));
+fn signed_cdj_helper_accepts_standard_serialization() {
+  assert!(satisfied(signed_witness_with_cdj(&common::client_data_json([42u8; 32]))));
+}
+
+#[test]
+fn challenge_after_origin_fails() {
+  // Same members, challenge no longer at byte 36. witness() rejects it, and so does the circuit.
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let cdj = format!(r#"{{"type":"webauthn.get","origin":"https://verena.se","challenge":"{b64}"}}"#);
+  let f = common::fixture_with_cdj(&[7u8; 32], [42u8; 32], 5, 0x05, TREE_DEPTH, cdj.clone());
+  assert!(f.inputs.witness().is_err());
+  assert!(!satisfied(signed_witness_with_cdj(&cdj)));
+}
+
+#[test]
+fn registration_type_fails() {
+  // A webauthn.create client data carrying the same challenge is not an assertion.
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let cdj = format!(r#"{{"type":"webauthn.create","challenge":"{b64}","origin":"https://verena.se"}}"#);
+  assert!(!satisfied(signed_witness_with_cdj(&cdj)));
+}
+
+#[test]
+fn longer_challenge_value_fails() {
+  // The challenge member's value must be exactly the 43 characters.
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let cdj = format!(r#"{{"type":"webauthn.get","challenge":"{b64}A","origin":"https://verena.se"}}"#);
+  let f = common::fixture_with_cdj(&[7u8; 32], [42u8; 32], 5, 0x05, TREE_DEPTH, cdj.clone());
+  assert!(f.inputs.witness().is_err());
+  assert!(!satisfied(signed_witness_with_cdj(&cdj)));
+}
+
+#[test]
+fn truncated_cdj_fails() {
+  // Prefix and challenge present, but the closing quote lies past the hashed length.
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let cdj = format!(r#"{{"type":"webauthn.get","challenge":"{b64}"#);
+  assert!(!satisfied(signed_witness_with_cdj(&cdj)));
 }
 
 #[test]
@@ -83,20 +133,39 @@ fn tampered_auth_data_fails() {
   assert!(!satisfied(w));
 }
 
-#[test]
-fn uv_unset_fails() {
-  // A genuinely signed assertion with UP but not UV.
-  let f = common::fixture_with_flags(&[7u8; 32], [42u8; 32], 5, 0x01);
-  assert!(f.inputs.witness().is_err(), "witness() should reject UV=0");
-  // Bypass the input check, then restore the signed flags byte: the signature is valid,
-  // so only the UV constraint can fail.
+/// A genuinely signed assertion with the given flags byte, bypassing `witness()`'s own
+/// flag check: the signature is valid, so only the flag constraints can fail.
+fn signed_witness_with_flags(flags: u8) -> PopWitness {
+  let f = common::fixture_with_flags(&[7u8; 32], [42u8; 32], 5, flags);
   let mut inputs = f.inputs.clone();
   let mut ad = URL_SAFE_NO_PAD.decode(&inputs.authenticator_data).unwrap();
   ad[32] = 0x05;
   inputs.authenticator_data = URL_SAFE_NO_PAD.encode(&ad);
   let mut w = inputs.witness().unwrap();
-  w.msg[32] = 0x01;
-  assert!(!satisfied(w));
+  w.msg[32] = flags;
+  w
+}
+
+#[test]
+fn uv_unset_fails() {
+  // UP but not UV.
+  let f = common::fixture_with_flags(&[7u8; 32], [42u8; 32], 5, 0x01);
+  assert!(f.inputs.witness().is_err(), "witness() should reject UV=0");
+  assert!(!satisfied(signed_witness_with_flags(0x01)));
+}
+
+#[test]
+fn up_unset_fails() {
+  // UV but not UP: an authenticator that verified without a presence test.
+  let f = common::fixture_with_flags(&[7u8; 32], [42u8; 32], 5, 0x04);
+  assert!(f.inputs.witness().is_err(), "witness() should reject UP=0");
+  assert!(!satisfied(signed_witness_with_flags(0x04)));
+}
+
+#[test]
+fn other_flags_do_not_matter() {
+  // UP | UV plus BE | BS: the circuit checks only UP and UV.
+  assert!(satisfied(signed_witness_with_flags(0x1d)));
 }
 
 #[test]
