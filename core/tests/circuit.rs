@@ -3,7 +3,7 @@ mod common;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bellpepper_core::test_cs::TestConstraintSystem;
 use pop_vega::api::{expected_public_values, scalar_to_hex};
-use pop_vega::circuit::{split, AccCircuit, PopCircuit, PopWitness, SigCircuit, TREE_DEPTH};
+use pop_vega::circuit::{split, AccCircuit, PopCircuit, PopWitness, SigCircuit, MAX_CDJ, TREE_DEPTH};
 use pop_vega::Scalar;
 use sha2::{Digest, Sha256};
 
@@ -116,6 +116,29 @@ fn truncated_cdj_fails() {
   let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
   let cdj = format!(r#"{{"type":"webauthn.get","challenge":"{b64}"#);
   assert!(!satisfied(signed_witness_with_cdj(&cdj)));
+}
+
+#[test]
+fn cross_origin_chrome_cdj_satisfies() {
+  // What Chrome signs for the widget iframe on a customer page: origin, crossOrigin, topOrigin and
+  // its "other_keys_can_be_added_here" note. Longer than the old 256-byte bound.
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let cdj = format!(
+    r#"{{"type":"webauthn.get","challenge":"{b64}","origin":"https://widget.verena.se","crossOrigin":true,"topOrigin":"https://www.some-customer-domain.example.com","other_keys_can_be_added_here":"do not compare clientDataJSON against a template. See https://goo.gl/yabPex"}}"#
+  );
+  assert!(cdj.len() > 256 && cdj.len() <= MAX_CDJ, "len {}", cdj.len());
+  let f = common::fixture_with_cdj(&[7u8; 32], [42u8; 32], 5, 0x05, TREE_DEPTH, cdj);
+  assert!(satisfied(f.inputs.witness().unwrap()));
+}
+
+#[test]
+fn cdj_over_max_rejected() {
+  let b64 = URL_SAFE_NO_PAD.encode([42u8; 32]);
+  let pad = "x".repeat(MAX_CDJ + 1 - 80 - 13);
+  let cdj = format!(r#"{{"type":"webauthn.get","challenge":"{b64}","origin":"{pad}"}}"#);
+  assert_eq!(cdj.len(), MAX_CDJ + 1);
+  let f = common::fixture_with_cdj(&[7u8; 32], [42u8; 32], 5, 0x05, TREE_DEPTH, cdj);
+  assert!(f.inputs.witness().is_err());
 }
 
 #[test]

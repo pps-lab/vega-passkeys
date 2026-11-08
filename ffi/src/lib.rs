@@ -38,7 +38,7 @@ impl From<api::PopError> for VegaError {
 pub struct ProverInputs {
   /// The signed authenticatorData (37..=128 bytes).
   pub authenticator_data: String,
-  /// The signed clientData JSON (at most 256 bytes); must start with
+  /// The signed clientData JSON (at most 375 bytes); must start with
   /// `{"type":"webauthn.get","challenge":"<challenge>"` (the WebAuthn client-data prefix).
   pub client_data_json: String,
   /// DER signature (as returned by `SecKeyCreateSignature`) or raw 64-byte r||s.

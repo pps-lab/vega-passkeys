@@ -47,8 +47,12 @@ pub const MIN_AUTH_DATA: usize = 37;
 pub const MAX_AUTH_DATA: usize = 128;
 pub const MAX_MSG: usize = MAX_AUTH_DATA + 32;
 pub const MSG_BLOCKS: usize = terminal_block_for_len(MAX_MSG);
-pub const MAX_CDJ: usize = 256;
+/// Browsers append `origin`, `crossOrigin`, `topOrigin` (when embedded cross-origin, e.g. the
+/// widget iframe on a customer page) and Chrome's ~110-byte `other_keys_can_be_added_here` note,
+/// so real clientDataJSON runs to ~300 bytes. 375 is the most that fits in 6 SHA-256 blocks.
+pub const MAX_CDJ: usize = 375;
 pub const CDJ_BLOCKS: usize = terminal_block_for_len(MAX_CDJ);
+const _: () = assert!(CDJ_BLOCKS == 6 && terminal_block_for_len(MAX_CDJ + 1) == 7);
 /// How a client serializes clientDataJSON for an assertion (WebAuthn §5.8.1.1): `type` first,
 /// then `challenge`, so base64url(challenge) always starts at byte `CHALLENGE_OFFSET`.
 pub const CDJ_PREFIX: &[u8] = b"{\"type\":\"webauthn.get\",\"challenge\":\"";

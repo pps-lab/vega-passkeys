@@ -31,8 +31,8 @@ It comes in two forms (`core/src/circuit.rs`):
 
 | | Circuit | Public values | Constraints (depth 20) |
 |---|---|---|---|
-| Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 250,820 |
-| Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 245,269 |
+| Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 280,811 |
+| Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 275,260 |
 | Split, accumulator | `AccCircuit`: 4 for the leaf inside the link | `[link, merkle_root]` | 6,131 |
 
 The split pair mirrors the Noir signature + accumulator circuits. The halves are joined by

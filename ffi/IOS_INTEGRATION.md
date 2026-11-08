@@ -32,7 +32,7 @@ let out = try prover.prove(inputs: inputs)    // ~0.25 s on M-series; CPU-bound,
 ```swift
 public struct ProverInputs {
   var authenticatorData: String   // base64url (no padding) of the signed authData, 37...128 bytes
-  var clientDataJson: String      // base64url of the signed clientData, ≤ 256 bytes, must contain the challenge string
+  var clientDataJson: String      // base64url of the signed clientData, ≤ 375 bytes, must contain the challenge string
   var signature: String           // base64url of the DER signature from SecKeyCreateSignature
   var pubKeyX: String             // `x` from the /v1/pubkeys entry (already base64url, pass through)
   var pubKeyY: String             // `y` from the /v1/pubkeys entry
@@ -88,7 +88,7 @@ directly) still works but reveals the credential to the server; switch away from
 
 ## 5. Constraints and errors
 
-- The circuit limits are authData 37–128 bytes and clientData ≤ 256 bytes. The current synthetic
+- The circuit limits are authData 37–128 bytes and clientData ≤ 375 bytes. The current synthetic
   37-byte authData and `{"type":"webauthn.get","challenge":"<challenge>"}` clientData fit.
 - authData byte 32 (flags) must have UP (`0x01`) and UV (`0x04`) set; the app uses `0x05`.
   Otherwise `prove` throws `InvalidInput`.
