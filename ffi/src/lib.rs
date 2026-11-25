@@ -180,6 +180,14 @@ pub fn limit_secret_commitment(secret: String) -> Result<String, VegaError> {
   Ok(api::scalar_to_hex(&poseidon::secret_commitment(api::scalar_from_hex(&secret)?)))
 }
 
+/// The token of use `counter` in an epoch, hex: what a proof of it would publish. For asking whether
+/// it is spent before the user is asked to sign.
+#[uniffi::export]
+pub fn limit_token(secret: String, epoch_label: String, counter: u32) -> Result<String, VegaError> {
+  let secret = api::scalar_from_hex(&secret)?;
+  Ok(api::scalar_to_hex(&poseidon::limit_token(secret, api::epoch_from_label(&epoch_label), counter)))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -211,6 +219,7 @@ mod tests {
     let out = limited.prove(inputs(), params(1)).unwrap();
     let (_pk, vk) = api::setup_limit(TREE_DEPTH).unwrap();
     assert_eq!(api::verify(&vk, &out.proof).unwrap(), out.public_values);
+    assert_eq!(limit_token(secret.clone(), "event/1".into(), 1).unwrap(), out.public_values[5]);
     assert!(limited.prove(inputs(), params(2)).is_err());
   }
 }

@@ -220,6 +220,13 @@ pub fn secret_commitment(secret: &str) -> Result<String, JsError> {
   Ok(api::scalar_to_hex(&poseidon::secret_commitment(api::scalar_from_hex(secret).map_err(err)?)))
 }
 
+/// The token (hex) of use `counter` in the epoch a label names: what a proof of it publishes.
+#[wasm_bindgen(js_name = limitToken)]
+pub fn limit_token(secret: &str, label: &str, counter: u32) -> Result<String, JsError> {
+  let secret = api::scalar_from_hex(secret).map_err(err)?;
+  Ok(api::scalar_to_hex(&poseidon::limit_token(secret, api::epoch_from_label(label), counter)))
+}
+
 /// A limit tree leaf over a key's commitment and its secret's commitment (hex).
 #[wasm_bindgen(js_name = limitLeaf)]
 pub fn limit_leaf(key_commitment: &str, secret_commitment: &str) -> Result<String, JsError> {
