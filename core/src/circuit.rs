@@ -119,7 +119,12 @@ impl PopWitness {
 
   /// The Merkle root this witness's path leads to.
   pub fn root(&self) -> Scalar {
-    let mut cur = poseidon::commitment(self.qx, self.qy);
+    self.root_from(poseidon::commitment(self.qx, self.qy))
+  }
+
+  /// The root this witness's path leads to from some other leaf (`limit::LimitWitness`).
+  pub fn root_from(&self, leaf: Scalar) -> Scalar {
+    let mut cur = leaf;
     for (sib, &right) in self.path.iter().zip(&self.indices) {
       cur = if right { poseidon::node(*sib, cur) } else { poseidon::node(cur, *sib) };
     }
@@ -155,7 +160,7 @@ fn inputize_lc<CS: ConstraintSystem<Scalar>>(
 
 /// Statement parts 1–3 (challenge, message, ECDSA); returns the key `(qx, qy)`. The
 /// challenge halves are the first two public inputs.
-fn synthesize_signature<CS: ConstraintSystem<Scalar>>(
+pub(crate) fn synthesize_signature<CS: ConstraintSystem<Scalar>>(
   cs: &mut CS,
   w: &PopWitness,
 ) -> Result<(AllocatedNum<Scalar>, AllocatedNum<Scalar>), SynthesisError> {
@@ -236,7 +241,7 @@ fn synthesize_signature<CS: ConstraintSystem<Scalar>>(
 }
 
 /// Part 4's Merkle path: walks from `leaf` up the given path and returns the root.
-fn synthesize_membership<CS: ConstraintSystem<Scalar>>(
+pub(crate) fn synthesize_membership<CS: ConstraintSystem<Scalar>>(
   cs: &mut CS,
   leaf: AllocatedNum<Scalar>,
   path: &[Scalar],
@@ -396,6 +401,8 @@ macro_rules! vega_circuit {
     }
   };
 }
+
+pub(crate) use vega_circuit;
 
 vega_circuit!(PopCircuit, |c: &PopCircuit| c.w.public_values());
 vega_circuit!(SigCircuit, |c: &SigCircuit| c.public_values());

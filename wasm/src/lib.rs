@@ -5,7 +5,7 @@
 //! The circuit shape depends on the Merkle depth, so each side holds the key for one depth
 //! at a time (a prover key is ~70 MB in memory) and re-derives it when the depth changes.
 
-use pop_vega::api::{self, PopInputs, ProverKey, VerifierKey};
+use pop_vega::api::{self, LimitInputs, PopInputs, ProverKey, VerifierKey};
 use pop_vega::circuit::TREE_DEPTH;
 use pop_vega::poseidon;
 use std::cell::RefCell;
@@ -17,6 +17,9 @@ thread_local! {
   // Split proof (benchmarks): the signature key is depth-independent.
   static SIG_PK: RefCell<Option<ProverKey>> = const { RefCell::new(None) };
   static ACC_PK: RefCell<Option<(usize, ProverKey)>> = const { RefCell::new(None) };
+  // The limit circuit (limit.rs): derived only where it is used.
+  static LIMIT_PK: RefCell<Option<(usize, ProverKey)>> = const { RefCell::new(None) };
+  static LIMIT_VK: RefCell<Option<(usize, VerifierKey)>> = const { RefCell::new(None) };
 }
 
 fn err(e: impl std::fmt::Display) -> JsError {
@@ -141,6 +144,88 @@ pub fn prove_accumulator(inputs: JsValue, blind: &str) -> Result<JsValue, JsErro
   init_accumulator_prover(acc.path.len())?;
   let out = ACC_PK.with(|pk| api::prove_accumulator(&pk.borrow().as_ref().expect("initialized").1, acc)).map_err(err)?;
   serde_wasm_bindgen::to_value(&ProveResult { proof: out.proof, public_values: out.public_values }).map_err(err)
+}
+
+/// Derives the limit circuit's prover key for a Merkle depth (default 20). Idempotent per depth.
+#[wasm_bindgen(js_name = initLimitProver)]
+pub fn init_limit_prover(depth: Option<usize>) -> Result<(), JsError> {
+  let depth = depth.unwrap_or(TREE_DEPTH);
+  if LIMIT_PK.with(|pk| matches!(&*pk.borrow(), Some((d, _)) if *d == depth)) {
+    return Ok(());
+  }
+  LIMIT_PK.with(|cell| *cell.borrow_mut() = None);
+  let (pk, _vk) = api::setup_limit(depth).map_err(err)?;
+  LIMIT_PK.with(|cell| *cell.borrow_mut() = Some((depth, pk)));
+  Ok(())
+}
+
+/// Derives the limit circuit's verifier key for a Merkle depth (default 20). Idempotent per depth.
+#[wasm_bindgen(js_name = initLimitVerifier)]
+pub fn init_limit_verifier(depth: Option<usize>) -> Result<(), JsError> {
+  let depth = depth.unwrap_or(TREE_DEPTH);
+  if LIMIT_VK.with(|vk| matches!(&*vk.borrow(), Some((d, _)) if *d == depth)) {
+    return Ok(());
+  }
+  LIMIT_VK.with(|cell| *cell.borrow_mut() = None);
+  let (_pk, vk) = api::setup_limit(depth).map_err(err)?;
+  LIMIT_VK.with(|cell| *cell.borrow_mut() = Some((depth, vk)));
+  Ok(())
+}
+
+/// Proves a limited assertion (see `LimitInputs` for the shape). Returns
+/// `{ proof, publicValues: [hi, lo, limit_root, epoch, limit, token] }`.
+#[wasm_bindgen(js_name = proveLimit)]
+pub fn prove_limit(inputs: JsValue) -> Result<JsValue, JsError> {
+  let inputs: LimitInputs = serde_wasm_bindgen::from_value(inputs).map_err(err)?;
+  let witness = inputs.witness().map_err(err)?;
+  init_limit_prover(Some(witness.pop.path.len()))?;
+  let out = LIMIT_PK.with(|pk| api::prove_limit(&pk.borrow().as_ref().expect("initialized").1, witness)).map_err(err)?;
+  serde_wasm_bindgen::to_value(&ProveResult { proof: out.proof, public_values: out.public_values }).map_err(err)
+}
+
+/// Verifies a limited proof for a Merkle depth (default 20); returns its public values, or throws.
+#[wasm_bindgen(js_name = verifyLimit)]
+pub fn verify_limit(proof: &[u8], depth: Option<usize>) -> Result<Vec<String>, JsError> {
+  init_limit_verifier(depth)?;
+  LIMIT_VK.with(|vk| api::verify(&vk.borrow().as_ref().expect("initialized").1, proof)).map_err(err)
+}
+
+/// All public values a limited proof must carry, except the token, which follows them.
+#[wasm_bindgen(js_name = expectedLimitPublicValues)]
+pub fn expected_limit_public_values(challenge: &str, root: &str, epoch: &str, limit: u32) -> Result<Vec<String>, JsError> {
+  let challenge: [u8; 32] = api::b64url(challenge)
+    .map_err(err)?
+    .try_into()
+    .map_err(|_| err("challenge must be 32 bytes"))?;
+  let root = api::scalar_from_hex(root).map_err(err)?;
+  let epoch = api::scalar_from_hex(epoch).map_err(err)?;
+  api::expected_limit_public_values(&challenge, &root, &epoch, limit).map_err(err)
+}
+
+/// The field element (hex) that stands for an epoch label.
+#[wasm_bindgen(js_name = epochFromLabel)]
+pub fn epoch_from_label(label: &str) -> String {
+  api::scalar_to_hex(&api::epoch_from_label(label))
+}
+
+/// A device's limit secret (hex) from 32 random bytes.
+#[wasm_bindgen(js_name = secretFromRandom)]
+pub fn secret_from_random(bytes: &[u8]) -> Result<String, JsError> {
+  Ok(api::scalar_to_hex(&api::secret_from_random(bytes).map_err(err)?))
+}
+
+/// What a device enrolls: the commitment to its secret (hex).
+#[wasm_bindgen(js_name = secretCommitment)]
+pub fn secret_commitment(secret: &str) -> Result<String, JsError> {
+  Ok(api::scalar_to_hex(&poseidon::secret_commitment(api::scalar_from_hex(secret).map_err(err)?)))
+}
+
+/// A limit tree leaf over a key's commitment and its secret's commitment (hex).
+#[wasm_bindgen(js_name = limitLeaf)]
+pub fn limit_leaf(key_commitment: &str, secret_commitment: &str) -> Result<String, JsError> {
+  let key = api::scalar_from_hex(key_commitment).map_err(err)?;
+  let secret = api::scalar_from_hex(secret_commitment).map_err(err)?;
+  Ok(api::scalar_to_hex(&poseidon::limit_leaf(key, secret)))
 }
 
 /// Public values a valid proof for this challenge (base64url) and root (hex) carries.

@@ -6,6 +6,7 @@ use crate::circuit::{
   MAX_CDJ, MIN_AUTH_DATA, MIN_CDJ, TREE_DEPTH,
 };
 use crate::gadgets::CHALLENGE_B64_LEN;
+use crate::limit::{LimitCircuit, LimitWitness, MAX_LIMIT};
 use crate::poseidon::{scalar_from_be_bytes, scalar_to_be_bytes};
 use crate::vendor::p256_ecc::p256_order;
 use crate::{Engine_, Scalar};
@@ -51,6 +52,68 @@ pub struct PopInputs {
   pub challenge: String,
   pub path_elements: Vec<String>,
   pub path_indices: Vec<u8>,
+}
+
+/// What a limited proof takes on top of an assertion (see `limit.rs`). The Merkle path in `pop` is
+/// the one in the limit tree.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitInputs {
+  #[serde(flatten)]
+  pub pop: PopInputs,
+  /// The device's secret, a field element as hex.
+  pub secret: String,
+  /// The epoch the verifier named, a field element as hex (see `epoch_from_label`).
+  pub epoch: String,
+  /// Which of the epoch's uses this is, from 0.
+  pub counter: u32,
+  /// How many uses the verifier allows per epoch.
+  pub limit: u32,
+}
+
+impl LimitInputs {
+  pub fn witness(&self) -> Result<LimitWitness, PopError> {
+    check_limit(self.limit)?;
+    if self.counter >= self.limit {
+      return Err(input_err("counter is not below the limit"));
+    }
+    Ok(LimitWitness {
+      pop: self.pop.witness()?,
+      secret: scalar_from_hex(&self.secret)?,
+      epoch: scalar_from_hex(&self.epoch)?,
+      counter: self.counter,
+      limit: self.limit,
+    })
+  }
+}
+
+fn check_limit(limit: u32) -> Result<(), PopError> {
+  if limit == 0 || limit > MAX_LIMIT {
+    return Err(input_err(format!("limit must be 1..={MAX_LIMIT}")));
+  }
+  Ok(())
+}
+
+/// The field element that stands for an epoch: `SHA-256("verena/epoch/v1" ‖ 0x00 ‖ label)`, its
+/// first 31 bytes. The label is whatever the verifier scopes uses by (an event's id; a site and a
+/// time window), so the device can derive it itself instead of taking a number on trust.
+pub fn epoch_from_label(label: &str) -> Scalar {
+  let mut data = b"verena/epoch/v1\0".to_vec();
+  data.extend_from_slice(label.as_bytes());
+  let mut be = [0u8; 32];
+  be[1..].copy_from_slice(&sha256(&data)[..31]);
+  scalar_from_be_bytes(&be).expect("31 bytes are below the modulus")
+}
+
+/// A device's limit secret from 32 random bytes: the first 31, so that it is always below the
+/// modulus. 248 bits.
+pub fn secret_from_random(bytes: &[u8]) -> Result<Scalar, PopError> {
+  if bytes.len() != 32 {
+    return Err(input_err("secret needs 32 random bytes"));
+  }
+  let mut be = [0u8; 32];
+  be[1..].copy_from_slice(&bytes[..31]);
+  Ok(scalar_from_be_bytes(&be).expect("31 bytes are below the modulus"))
 }
 
 pub fn b64url(s: &str) -> Result<Vec<u8>, PopError> {
@@ -205,6 +268,14 @@ pub fn setup_accumulator(depth: usize) -> Result<(ProverKey, VerifierKey), PopEr
   setup_circuit(AccCircuit::dummy(depth))
 }
 
+/// Setup for the limit circuit at a Merkle depth: keys of its own, unrelated to `setup`'s.
+pub fn setup_limit(depth: usize) -> Result<(ProverKey, VerifierKey), PopError> {
+  if depth == 0 {
+    return Err(input_err("Merkle depth must be positive"));
+  }
+  setup_circuit(LimitCircuit { w: LimitWitness::dummy(depth) })
+}
+
 fn setup_circuit<C: VegaCircuit<Engine_>>(c: C) -> Result<(ProverKey, VerifierKey), PopError> {
   Snark::setup(c).map_err(|e| PopError::Vega(format!("{e:?}")))
 }
@@ -236,6 +307,11 @@ pub fn prove_accumulator(pk: &ProverKey, c: AccCircuit) -> Result<ProofOutput, P
   prove_circuit(pk, c)
 }
 
+/// Proves a limited assertion; public values `[challenge_hi, challenge_lo, limit_root, epoch, limit, token]`.
+pub fn prove_limit(pk: &ProverKey, w: LimitWitness) -> Result<ProofOutput, PopError> {
+  prove_circuit(pk, LimitCircuit { w })
+}
+
 fn prove_circuit<C: VegaCircuit<Engine_>>(pk: &ProverKey, circuit: C) -> Result<ProofOutput, PopError> {
   let public_values = circuit
     .public_values()
@@ -260,6 +336,16 @@ pub fn verify(vk: &VerifierKey, proof: &[u8]) -> Result<Vec<String>, PopError> {
 pub fn expected_public_values(challenge: &[u8; 32], root: &Scalar) -> Vec<String> {
   let [hi, lo] = PopWitness::challenge_halves(challenge);
   vec![scalar_to_hex(&hi), scalar_to_hex(&lo), scalar_to_hex(root)]
+}
+
+/// Public values a verifier should expect of a limited proof, all but the token, which comes last
+/// and is the one thing the prover contributes.
+pub fn expected_limit_public_values(challenge: &[u8; 32], root: &Scalar, epoch: &Scalar, limit: u32) -> Result<Vec<String>, PopError> {
+  check_limit(limit)?;
+  let mut v = expected_public_values(challenge, root);
+  v.push(scalar_to_hex(epoch));
+  v.push(scalar_to_hex(&Scalar::from(limit as u64)));
+  Ok(v)
 }
 
 pub fn serialize<T: Serialize>(v: &T) -> Result<Vec<u8>, PopError> {

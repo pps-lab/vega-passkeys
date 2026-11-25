@@ -7,7 +7,8 @@
 //! let out = try prover.prove(inputs: inputs)  // ProofOutput { proof, publicValues, proveMs }
 //! ```
 
-use pop_vega::api::{self, PopInputs, ProverKey};
+use pop_vega::api::{self, LimitInputs, PopInputs, ProverKey};
+use pop_vega::{circuit::TREE_DEPTH, poseidon};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,6 +56,38 @@ pub struct ProverInputs {
   pub path_indices: Vec<u32>,
 }
 
+impl ProverInputs {
+  fn into_pop(self) -> Result<PopInputs, VegaError> {
+    Ok(PopInputs {
+      authenticator_data: self.authenticator_data,
+      client_data_json: self.client_data_json,
+      signature: self.signature,
+      pub_key_x: self.pub_key_x,
+      pub_key_y: self.pub_key_y,
+      challenge: self.challenge,
+      path_elements: self.path_elements,
+      path_indices: self
+        .path_indices
+        .into_iter()
+        .map(|i| u8::try_from(i).map_err(|_| VegaError::InvalidInput { msg: "path index must be 0 or 1".into() }))
+        .collect::<Result<_, _>>()?,
+    })
+  }
+}
+
+/// What a limited proof takes on top of `ProverInputs` (whose path is the one in the limit tree).
+#[derive(uniffi::Record)]
+pub struct LimitParams {
+  /// The device's secret (`limit_secret`), hex.
+  pub secret: String,
+  /// The epoch's label as the server names it; its field element is derived here.
+  pub epoch_label: String,
+  /// Which of the epoch's uses this is, from 0.
+  pub counter: u32,
+  /// How many uses the server allows per epoch.
+  pub limit: u32,
+}
+
 #[derive(uniffi::Record)]
 pub struct ProofOutput {
   /// Proof bytes; send base64-encoded as `proof`.
@@ -89,25 +122,62 @@ impl VegaProver {
 
   /// Proves a signed assertion. CPU-bound (uses all cores); call off the main thread.
   pub fn prove(&self, inputs: ProverInputs) -> Result<ProofOutput, VegaError> {
-    let inputs = PopInputs {
-      authenticator_data: inputs.authenticator_data,
-      client_data_json: inputs.client_data_json,
-      signature: inputs.signature,
-      pub_key_x: inputs.pub_key_x,
-      pub_key_y: inputs.pub_key_y,
-      challenge: inputs.challenge,
-      path_elements: inputs.path_elements,
-      path_indices: inputs
-        .path_indices
-        .into_iter()
-        .map(|i| u8::try_from(i).map_err(|_| VegaError::InvalidInput { msg: "path index must be 0 or 1".into() }))
-        .collect::<Result<_, _>>()?,
-    };
+    let inputs = inputs.into_pop()?;
     let witness = inputs.witness()?;
     let t = Instant::now();
     let out = api::prove(&self.pk, witness)?;
     Ok(ProofOutput { proof: out.proof, public_values: out.public_values, prove_ms: t.elapsed().as_millis() as u64 })
   }
+}
+
+/// `VegaProver` for the limit circuit: its own key, so make one only for a session with a limit.
+#[derive(uniffi::Object)]
+pub struct VegaLimitProver {
+  pk: ProverKey,
+  setup_ms: u64,
+}
+
+#[uniffi::export]
+impl VegaLimitProver {
+  #[uniffi::constructor]
+  pub fn new() -> Result<Arc<Self>, VegaError> {
+    let t = Instant::now();
+    let (pk, _vk) = api::setup_limit(TREE_DEPTH)?;
+    Ok(Arc::new(VegaLimitProver { pk, setup_ms: t.elapsed().as_millis() as u64 }))
+  }
+
+  /// How long setup took, in milliseconds.
+  pub fn setup_ms(&self) -> u64 {
+    self.setup_ms
+  }
+
+  /// Proves a signed assertion and its use number. CPU-bound; call off the main thread. Public
+  /// values: `[challenge_hi, challenge_lo, limit_root, epoch, limit, token]`.
+  pub fn prove(&self, inputs: ProverInputs, limit: LimitParams) -> Result<ProofOutput, VegaError> {
+    let inputs = LimitInputs {
+      pop: inputs.into_pop()?,
+      secret: limit.secret,
+      epoch: api::scalar_to_hex(&api::epoch_from_label(&limit.epoch_label)),
+      counter: limit.counter,
+      limit: limit.limit,
+    };
+    let witness = inputs.witness()?;
+    let t = Instant::now();
+    let out = api::prove_limit(&self.pk, witness)?;
+    Ok(ProofOutput { proof: out.proof, public_values: out.public_values, prove_ms: t.elapsed().as_millis() as u64 })
+  }
+}
+
+/// A new limit secret from 32 random bytes, hex. Keep it on the device.
+#[uniffi::export]
+pub fn limit_secret(random: Vec<u8>) -> Result<String, VegaError> {
+  Ok(api::scalar_to_hex(&api::secret_from_random(&random)?))
+}
+
+/// What the device enrolls for its secret, hex.
+#[uniffi::export]
+pub fn limit_secret_commitment(secret: String) -> Result<String, VegaError> {
+  Ok(api::scalar_to_hex(&poseidon::secret_commitment(api::scalar_from_hex(&secret)?)))
 }
 
 #[cfg(test)]
@@ -119,19 +189,28 @@ mod tests {
     let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/vectors/fixture.json")).unwrap();
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
     let i: PopInputs = serde_json::from_value(v["inputs"].clone()).unwrap();
-    let inputs = ProverInputs {
-      authenticator_data: i.authenticator_data,
-      client_data_json: i.client_data_json,
-      signature: i.signature,
-      pub_key_x: i.pub_key_x,
-      pub_key_y: i.pub_key_y,
-      challenge: i.challenge,
-      path_elements: i.path_elements,
-      path_indices: i.path_indices.into_iter().map(u32::from).collect(),
+    let inputs = || ProverInputs {
+      authenticator_data: i.authenticator_data.clone(),
+      client_data_json: i.client_data_json.clone(),
+      signature: i.signature.clone(),
+      pub_key_x: i.pub_key_x.clone(),
+      pub_key_y: i.pub_key_y.clone(),
+      challenge: i.challenge.clone(),
+      path_elements: i.path_elements.clone(),
+      path_indices: i.path_indices.iter().copied().map(u32::from).collect(),
     };
     let prover = VegaProver::new().unwrap();
-    let out = prover.prove(inputs).unwrap();
+    let out = prover.prove(inputs()).unwrap();
     let (_pk, vk) = api::setup().unwrap();
     assert_eq!(api::verify(&vk, &out.proof).unwrap(), out.public_values);
+
+    let secret = limit_secret(vec![7; 32]).unwrap();
+    assert!(limit_secret_commitment(secret.clone()).unwrap().starts_with("0x"));
+    let limited = VegaLimitProver::new().unwrap();
+    let params = |counter| LimitParams { secret: secret.clone(), epoch_label: "event/1".into(), counter, limit: 2 };
+    let out = limited.prove(inputs(), params(1)).unwrap();
+    let (_pk, vk) = api::setup_limit(TREE_DEPTH).unwrap();
+    assert_eq!(api::verify(&vk, &out.proof).unwrap(), out.public_values);
+    assert!(limited.prove(inputs(), params(2)).is_err());
   }
 }

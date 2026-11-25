@@ -19,6 +19,12 @@ pub const TAG_COMMITMENT: u64 = 1;
 pub const TAG_NODE: u64 = 2;
 /// Domain tag for the split proofs' link `H(leaf, blind)`.
 pub const TAG_LINK: u64 = 3;
+/// Domain tags of the limit circuit (`limit.rs`): the commitment to a device's secret, the limit
+/// tree's leaf, and the two steps of the token PRF.
+pub const TAG_SECRET: u64 = 4;
+pub const TAG_LIMIT_LEAF: u64 = 5;
+pub const TAG_EPOCH: u64 = 6;
+pub const TAG_TOKEN: u64 = 7;
 
 struct Params {
   rc: Vec<Scalar>,
@@ -113,6 +119,21 @@ pub fn node(left: Scalar, right: Scalar) -> Scalar {
 /// Blinded link between the split proofs: hides the leaf, binds both halves to it.
 pub fn link(leaf: Scalar, blind: Scalar) -> Scalar {
   hash2(TAG_LINK, leaf, blind)
+}
+
+/// Hiding commitment to a device's limit secret (a uniformly random field element).
+pub fn secret_commitment(secret: Scalar) -> Scalar {
+  hash2(TAG_SECRET, secret, Scalar::ZERO)
+}
+
+/// A leaf of the limit tree: a key's `commitment` and its secret's commitment.
+pub fn limit_leaf(key_commitment: Scalar, secret_commitment: Scalar) -> Scalar {
+  hash2(TAG_LIMIT_LEAF, key_commitment, secret_commitment)
+}
+
+/// The token for use number `counter` in an epoch: a PRF keyed with the secret.
+pub fn limit_token(secret: Scalar, epoch: Scalar, counter: u32) -> Scalar {
+  hash2(TAG_TOKEN, hash2(TAG_EPOCH, secret, epoch), Scalar::from(counter as u64))
 }
 
 /// A state element: a linear combination plus its witness value. Keeping the linear

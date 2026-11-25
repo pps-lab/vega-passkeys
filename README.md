@@ -27,11 +27,12 @@ Everything below is private except the challenge and the root.
 4. `commitment(qx, qy)` is a leaf of a Merkle tree with the public root. The depth is the path
    length and is fixed at setup; the deployment uses 20.
 
-It comes in two forms (`core/src/circuit.rs`):
+It comes in these forms (`core/src/circuit.rs`, `core/src/limit.rs`):
 
 | | Circuit | Public values | Constraints (depth 20) |
 |---|---|---|---|
 | Combined | `PopCircuit`: 1–4 | `[challenge_hi, challenge_lo, merkle_root]` | 280,811 |
+| Limited (`limit.rs`) | `LimitCircuit`: 1–3, a leaf over the key and a secret, and a per-epoch token with a bounded counter | `[challenge_hi, challenge_lo, limit_root, epoch, limit, token]` | 282,005 |
 | Split, signature | `SigCircuit`: 1–3 and the link | `[challenge_hi, challenge_lo, link]` | 275,260 |
 | Split, accumulator | `AccCircuit`: 4 for the leaf inside the link | `[link, merkle_root]` | 6,131 |
 
@@ -61,6 +62,7 @@ Differences from the Noir circuits:
 | Path | What |
 |---|---|
 | `core/src/circuit.rs` | `PopCircuit`, `SigCircuit`, `AccCircuit` (bellpepper R1CS) |
+| `core/src/limit.rs` | `LimitCircuit`: at most `limit` uses per epoch, with keys of its own |
 | `core/src/gadgets.rs` | base64url, one-hot selection, digest→BigNat |
 | `core/src/poseidon.rs` | native and in-circuit Poseidon |
 | `core/src/vendor/` | ECDSA-P256, P-256 point ops, BigNat and variable-length SHA-256 from [sirosfoundation/zk-cred-vega](https://github.com/sirosfoundation/zk-cred-vega) (BSD-2). That code is unaudited. |
@@ -94,7 +96,7 @@ or 3.9 MB gzipped for the prover key.
 
 **Changing the deployed circuit.** Any change to `PopCircuit`'s constraints changes verena.se's
 keys, and the server, widget and iOS app must then update together. `vk_digest` at depth 20 must
-print `[85, 242, 198, 120, 90, 190, 145, 207, …]` unless that is intended.
+print `[99, 127, 236, 11, 220, 220, 77, 81, …]` unless that is intended.
 
 ## Results (Apple M5 Pro)
 

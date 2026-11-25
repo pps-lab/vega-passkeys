@@ -8,4 +8,6 @@ fn main() {
   let depth = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(20);
   let (_pk, vk) = api::setup_with_depth(depth).unwrap();
   println!("depth {depth} vk digest {:?}", vk.digest().unwrap());
+  let (_pk, vk) = api::setup_limit(depth).unwrap();
+  println!("depth {depth} limit vk digest {:?}", vk.digest().unwrap());
 }

@@ -7,6 +7,7 @@
 pub mod api;
 pub mod circuit;
 pub mod gadgets;
+pub mod limit;
 pub mod poseidon;
 #[rustfmt::skip]
 mod poseidon_constants;
